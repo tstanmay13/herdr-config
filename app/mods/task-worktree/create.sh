@@ -50,11 +50,14 @@ git -C "$top" worktree add --quiet -b "$branch" "$path" "$base" || fail "git wor
 rmdir "$lock" 2>/dev/null
 have_lock=0
 
+# herdr-app do parses JSON-looking values (222222, true, null) as JSON, so pass the name as a
+# JSON string. The slug is only [a-z0-9-], so wrapping it in quotes is enough.
+name_json="\"$slug\""
 if [ "$mode" = "tab" ] && [ "$space" != "-" ]; then
-  "$app" do tab.new --name "$slug" --space "$space" --folder "$path" || fail "worktree created at $path, but opening the tab failed"
+  "$app" do tab.new --name "$name_json" --space "$space" --folder "$path" || fail "worktree created at $path, but opening the tab failed"
 elif [ "$mode" = "tab" ]; then
-  "$app" do tab.new --name "$slug" --folder "$path" || fail "worktree created at $path, but opening the tab failed"
+  "$app" do tab.new --name "$name_json" --folder "$path" || fail "worktree created at $path, but opening the tab failed"
 else
-  "$app" do space.new --folder "$path" --tab "$slug" || fail "worktree created at $path, but opening the space failed"
+  "$app" do space.new --folder "$path" --tab "$name_json" || fail "worktree created at $path, but opening the space failed"
 fi
 echo "done"
