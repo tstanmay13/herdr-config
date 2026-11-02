@@ -1,0 +1,126 @@
+# herdr configuration — tstanmay13/herdr-config
+# Linked to ~/.config/herdr/config.toml by install.sh. Defaults: `herdr --default-config`.
+# Apply edits with `herdr server reload-config` (or prefix+shift+r).
+
+onboarding = false
+
+[theme]
+# Matches the Catppuccin theme in ghostty-config.
+name = "catppuccin"
+auto_switch = true
+dark_name = "catppuccin"
+light_name = "catppuccin-latte"
+
+[terminal]
+new_cwd = "follow"
+
+[keys]
+# Prefix stays tmux-style (ctrl+b; prefix+? lists every binding).
+# Direct ctrl+alt chords cover the things cmux had on Cmd. They work in Ghostty because
+# ghostty's config sets macos-option-as-alt = true.
+switch_workspace = "ctrl+alt+1..9"          # cmux Cmd-1..9
+previous_agent = "ctrl+alt+k"              # walk agents, not panes
+next_agent = "ctrl+alt+j"
+open_notification_target = "ctrl+alt+u"    # cmux Cmd-Shift-U: jump to the newest alert
+zoom = "ctrl+alt+z"                        # cmux Cmd-Shift-Return
+last_pane = "ctrl+alt+tab"
+
+# cmux Cmd-N: task worktree with my branch/path conventions (scripts/new-worktree.sh).
+# herdr's own prefix+shift+g worktree flow is still available; it uses [worktrees].directory.
+[[keys.command]]
+key = "ctrl+alt+n"
+type = "popup"
+command = "\"$HOME/Documents/personal/herdr-config/scripts/new-worktree.sh\""
+width = "70%"
+height = "40%"
+
+[[keys.command]]
+key = "ctrl+alt+g"
+type = "popup"
+command = "lazygit"
+width = "90%"
+height = "90%"
+
+# ---- plugins (plugins.txt) ----
+# Navigator: fuzzy jump to any workspace, agent, project or directory (cmux Cmd-Shift-P).
+[[keys.command]]
+key = "ctrl+alt+p"
+type = "plugin_action"
+command = "herdr-navigator.open"
+description = "Navigator"
+
+[[keys.command]]
+key = "ctrl+alt+o"
+type = "plugin_action"
+command = "herdr-navigator.jump-back"
+description = "Navigator: jump back"
+
+# Browser split (cmux Cmd-Shift-L).
+[[keys.command]]
+key = "ctrl+alt+b"
+type = "plugin_action"
+command = "zenbu-labs.terminal-browser.open-split"
+description = "Browser split"
+
+[[keys.command]]
+key = "ctrl+alt+f"
+type = "plugin_action"
+command = "herdr-file-viewer.open-file-viewer"
+description = "File viewer"
+
+# Review the agent's diff and send line comments back to it.
+[[keys.command]]
+key = "ctrl+alt+r"
+type = "plugin_action"
+command = "persiyanov.reviewr.toggle"
+description = "Review diff"
+
+[[keys.command]]
+key = "ctrl+alt+e"
+type = "plugin_action"
+command = "herdr-sidebar.open-sidebar"
+description = "Explorer sidebar"
+
+[[keys.command]]
+key = "ctrl+alt+s"
+type = "plugin_action"
+command = "herdr-sidebar.open-git"
+description = "Source control"
+
+# Select terminal text, annotate it, then send all notes to the focused agent.
+[[keys.command]]
+key = "ctrl+alt+a"
+type = "plugin_action"
+command = "annotate.capture"
+description = "Annotate selection"
+
+[[keys.command]]
+key = "ctrl+alt+m"
+type = "plugin_action"
+command = "annotate.send-archive"
+description = "Send annotations to agent"
+
+[ui]
+# With ~20 agents, sort by who needs me (blocked first) instead of by workspace.
+agent_panel_sort = "priority"
+status_indicators = "symbols"
+show_agent_labels_on_pane_borders = true
+prompt_new_tab_name = false
+confirm_close = true
+
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+
+[ui.toast]
+# macOS notification center, like cmux. No sound (cmux was silenced too).
+delivery = "system"
+
+[ui.sound]
+enabled = false
+
+[session]
+resume_agents_on_restore = true
+
+[experimental]
+# Keep recent pane screen history across full server restarts.
+pane_history = true

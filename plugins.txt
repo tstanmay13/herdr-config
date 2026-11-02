@@ -1,0 +1,11 @@
+# herdr plugins installed by install.sh. Columns: plugin id (from its herdr-plugin.toml),
+# install source owner/repo[/subdir], pinned git ref, then an optional comment.
+# Plugins are not sandboxed: their build steps run as you. Read a plugin's herdr-plugin.toml
+# and build script before adding it, and pin a tag. `herdr plugin update` moves to latest.
+herdr-navigator              thanhdat77/herdr-navigator                       v0.3.6            # fuzzy jump to workspace/agent/dir (cargo build)
+zenbu-labs.terminal-browser  zenbu-labs/terminal-browser/herdr-plugin         v0.15.3           # Chromium in a split; installer pins + sha256-checks its binary
+herdr-file-viewer            smarzban/herdr-file-viewer                       v1.18.0           # git-aware read-only file tree, diffs, markdown
+persiyanov.reviewr           persiyanov/herdr-reviewr                         v0.49.0           # review agent diffs, send line comments to the agent
+herdr-sidebar                alexarthurs/herdr-sidebar/plugins/herdr-sidebar  v0.15.1           # VS Code-style explorer + source control
+annotate                     plannotator/herdr-annotate                       rust-lite-v0.2.3  # annotate terminal output, send it as agent context
+herdr.auto-title             kryptamine/herdr-auto-title                      v0.19.0           # names tabs/panes from agent session + branch
