@@ -126,8 +126,12 @@ export function make(mode) {
       // The tab goes to the space that was focused at Enter, even if focus moves meanwhile.
       step("Starting…");
       const task = this.message.trim();
-      // The task travels as a JSON string: herdr-app do parses JSON-looking values.
-      const args = [mode, focused()?.space ?? "-", r.top, r.common, p.branch, p.path, r.base, r.baseRemote ?? "-", p.slug, task ? JSON.stringify(task) : "-"];
+      // The whole open request goes to create.sh as one JSON object (see create.sh for why).
+      const space = focused()?.space;
+      const open = mode === "tab"
+        ? { name: p.slug, ...(space ? { space } : {}), folder: p.path, argv: ["claude"], ...(task ? { task } : {}) }
+        : { tab: p.slug, folder: p.path, argv: ["claude"], ...(task ? { task } : {}) };
+      const args = [mode, r.top, r.common, p.branch, p.path, r.base, r.baseRemote ?? "-", p.slug, JSON.stringify(open)];
       const started = await exec("sh", ["-c", 'nohup sh "$0" "$@" >/dev/null 2>&1 </dev/null &', CREATE_SH, ...args]);
       if (started.code !== 0) throw `Could not start create.sh: ${(started.stderr ?? "").trim()}`;
       notify({ title: `Creating ${p.slug}…`, body: `${p.branch} from ${r.base}`, level: "info", timeout: 4000 });

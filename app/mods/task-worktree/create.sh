@@ -2,16 +2,18 @@
 # Background half of the task-worktree mod: fetch, create the worktree, then open it in Herdr.
 # The mod validates first, starts this detached and closes its dialog, so creations queue up.
 #
-# usage: create.sh <space|tab> <space-id|-> <repo-top> <git-common-dir> <branch> <path> <base> <base-remote|-> <slug> [task-json|-]
+# usage: create.sh <space|tab> <repo-top> <git-common-dir> <branch> <path> <base> <base-remote|-> <slug> <open-json>
 #
-# The new tab (or the space's first tab) starts `claude`; task-json, a JSON string, is its first message.
+# open-json is the full tab.new (mode tab) or space.new (mode space) request, built by the mod:
+# name, space, folder, argv ["claude"], optional task. It is passed as one JSON object because
+# `herdr-app do --flag value` converts JSON-looking values (222222 becomes a number) but keeps
+# quoted strings literally, so flags cannot carry every name safely.
 #
 # Creations in the same repo run one at a time (a lock dir in the git common dir), so parallel
 # `git worktree add` calls don't collide. Output goes to ~/.local/state/herdr-task-worktree/<slug>.log;
 # failures also post a macOS notification. HERDR_APP_BIN overrides the herdr-app binary (tests).
 set -u
-mode=$1 space=$2 top=$3 common=$4 branch=$5 path=$6 base=$7 remote=$8 slug=$9
-task_json=${10:--}
+mode=$1 top=$2 common=$3 branch=$4 path=$5 base=$6 remote=$7 slug=$8 open_json=$9
 
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-task-worktree"
 mkdir -p "$log_dir"
@@ -53,16 +55,6 @@ git -C "$top" worktree add --quiet -b "$branch" "$path" "$base" || fail "git wor
 rmdir "$lock" 2>/dev/null
 have_lock=0
 
-# herdr-app do parses JSON-looking values (222222, true, null) as JSON, so pass the name as a
-# JSON string. The slug is only [a-z0-9-], so wrapping it in quotes is enough.
-name_json="\"$slug\""
-set -- --folder "$path" --argv '["claude"]'
-[ "$task_json" != "-" ] && set -- "$@" --task "$task_json"
-if [ "$mode" = "tab" ] && [ "$space" != "-" ]; then
-  "$app" do tab.new --name "$name_json" --space "$space" "$@" || fail "worktree created at $path, but opening the tab failed"
-elif [ "$mode" = "tab" ]; then
-  "$app" do tab.new --name "$name_json" "$@" || fail "worktree created at $path, but opening the tab failed"
-else
-  "$app" do space.new --tab "$name_json" "$@" || fail "worktree created at $path, but opening the space failed"
-fi
+if [ "$mode" = "tab" ]; then cmd=tab.new; else cmd=space.new; fi
+"$app" do "$cmd" "$open_json" || fail "worktree created at $path, but opening the $mode failed"
 echo "done"
