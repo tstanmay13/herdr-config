@@ -18,7 +18,7 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
 | Cmd-Shift-T | New worker: task worktree + a tab in the current space, `claude` started in it |
 | Cmd-Shift-N | Blank space, no worktree |
 | Cmd-Alt-K | Clean up the focused repo's worktrees |
-| Cmd-Alt-O | Show or hide the PR panel and job board |
+| Cmd-Alt-O | Show or hide the job panel |
 
 ## Mods
 
@@ -34,18 +34,20 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   uncommitted changes and open tabs. Merged-and-clean ones start selected; ones with
   uncommitted changes cannot be selected. Removing closes the tabs inside, runs
   `git worktree remove` (never `--force`), and deletes the branch only if its PR merged.
-- `pr-panel`: the focused tab's PR from `gh pr view`: state, merge state (conflicts mean no
-  PR workflows run), review decision, every check by name with failures first. Click the
-  title to open it. Refreshes on focus change and every 60 s.
-- `job-board`: the orchestrate run for the focused space (the run whose `state.md` names a
-  worktree open in it, else the newest), from its units table: PR, status, implementer and
-  verifier, and whether the verified SHA matches the tip. Chips switch runs. Refreshes when
-  anything under the runs folders changes.
+- `job-panel`: one row per unit of the focused space's orchestrate run (the run whose
+  `state.md` names a worktree open in the space; chips pick another). Each row puts the
+  orchestrator's claim (verified SHA, status note) next to GitHub now (`gh pr view`: head SHA,
+  checks, conflicts, review) and flags mismatches in red: failing checks, conflicts, head is
+  not the verified SHA, changes requested. Merged or closed PRs are not flagged. Tabs whose
+  branch has a PR but no unit show as "not in state.md"; a space with no run shows just its
+  tabs' PRs. The focused tab's unit is highlighted and expanded with every check; click a
+  row to expand it, click the PR number to open it. Refreshes on space change, when a
+  `state.md` changes, and every 60 s.
 
 ## Layout
 
 `layouts/tanmay.json` is a clone of the shipped `main` layout (shipped layouts are read-only)
-with one added column, `ops`, holding `pr-panel` above `job-board`, hidden by default.
+with one added column, `ops`, holding `job-panel`, hidden by default.
 
 ## Notes
 

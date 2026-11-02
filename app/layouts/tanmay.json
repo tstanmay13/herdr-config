@@ -155,34 +155,24 @@
             {
               "id": "ops",
               "type": "column",
-              "hidden": true,
+              "children": [
+                {
+                  "id": "ops-job",
+                  "type": "block",
+                  "size": {
+                    "weight": 1
+                  },
+                  "content": {
+                    "mod": "job-panel"
+                  }
+                }
+              ],
               "size": {
                 "px": 340
               },
               "min": 260,
               "max": 700,
-              "children": [
-                {
-                  "id": "ops-pr",
-                  "type": "block",
-                  "size": {
-                    "weight": 1
-                  },
-                  "content": {
-                    "mod": "pr-panel"
-                  }
-                },
-                {
-                  "id": "ops-jobs",
-                  "type": "block",
-                  "size": {
-                    "weight": 1
-                  },
-                  "content": {
-                    "mod": "job-board"
-                  }
-                }
-              ]
+              "hidden": true
             }
           ],
           "padding": 8,
@@ -200,6 +190,16 @@
         }
       ],
       "resizable": false
+    },
+    {
+      "id": "b9015042b10965f93c20dacca46ae763a",
+      "type": "block",
+      "content": {
+        "mod": "job-panel"
+      },
+      "size": {
+        "px": 320
+      }
     }
   ],
   "background": "canvas",

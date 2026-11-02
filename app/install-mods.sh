@@ -7,7 +7,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 app="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 mkdir -p "$app/mods" "$app/layouts"
 
-for m in task-worktree worktree-prune pr-panel job-board; do
+for m in task-worktree worktree-prune job-panel; do
   mkdir -p "$app/mods/$m"
   cp "$here/mods/$m/"* "$app/mods/$m/"
 done
