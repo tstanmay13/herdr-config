@@ -9,9 +9,11 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, InputState, Input } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, focused, exec, home } from "herdr";
+import { props, closeOverlay, notify, theme, spaces, panes, focused, exec, home } from "herdr";
 
 const DEFAULT_PREFIX = "tanmaysingh";
+// Shared by task-worktree and task-worktree-tab (exec may run files outside a mod's folder).
+const CREATE_SH = `${home()}/.config/herdr-app/mods/task-worktree/create.sh`;
 
 async function git(cwd, args) {
   const r = await exec("git", args, { cwd });
@@ -70,7 +72,7 @@ async function resolve(folder) {
   base = base || "HEAD";
   const remotes = (await git(main, ["remote"])).out.split("\n");
   const baseRemote = base.includes("/") && remotes.includes(base.split("/")[0]) ? base.split("/")[0] : null;
-  return { top: top.out, main, name, prefix, root, base, baseRemote };
+  return { top: top.out, main, common: common.out, name, prefix, root, base, baseRemote };
 }
 
 export function make(mode) {
@@ -111,18 +113,14 @@ export function make(mode) {
       if (!(await git(r.main, ["check-ref-format", "--branch", p.branch])).ok) throw `Not a valid branch name: ${p.branch}`;
       if ((await git(r.main, ["show-ref", "--verify", "--quiet", `refs/heads/${p.branch}`])).ok) throw `Branch already exists: ${p.branch}`;
       if ((await exec("test", ["-e", p.path])).code === 0) throw `Path already exists: ${tilde(p.path)}`;
-      if (r.baseRemote) {
-        step(`Fetching ${r.base}…`);
-        const f = await git(r.main, ["fetch", "--quiet", r.baseRemote, r.base.slice(r.baseRemote.length + 1)]);
-        if (!f.ok) throw `Could not fetch ${r.base}: ${f.err}`;
-      }
-      step("Creating worktree…");
-      await exec("mkdir", ["-p", r.root]);
-      const add = await git(r.top, ["worktree", "add", "--quiet", "-b", p.branch, p.path, r.base]);
-      if (!add.ok) throw add.err || "git worktree add failed.";
-      if (mode === "tab") run("tab.new", { name: p.slug, folder: p.path });
-      // Unnamed: the space is called after its folder (the slug) and nests under the repo.
-      else run("space.new", { folder: p.path });
+      // The slow part (fetch, checkout) runs detached in create.sh, which opens the space or tab
+      // itself when done, so the dialog closes now and several creations can queue up.
+      // The tab goes to the space that was focused at Enter, even if focus moves meanwhile.
+      step("Starting…");
+      const args = [mode, focused()?.space ?? "-", r.top, r.common, p.branch, p.path, r.base, r.baseRemote ?? "-", p.slug];
+      const started = await exec("sh", ["-c", 'nohup sh "$0" "$@" >/dev/null 2>&1 </dev/null &', CREATE_SH, ...args]);
+      if (started.code !== 0) throw `Could not start create.sh: ${(started.stderr ?? "").trim()}`;
+      notify({ title: `Creating ${p.slug}…`, body: `${p.branch} from ${r.base}`, level: "info", timeout: 4000 });
       closeOverlay(props()?.overlay);
     } catch (e) {
       this.error = String(e);
