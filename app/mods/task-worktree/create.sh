@@ -55,6 +55,6 @@ if [ "$mode" = "tab" ] && [ "$space" != "-" ]; then
 elif [ "$mode" = "tab" ]; then
   "$app" do tab.new --name "$slug" --folder "$path" || fail "worktree created at $path, but opening the tab failed"
 else
-  "$app" do space.new --folder "$path" || fail "worktree created at $path, but opening the space failed"
+  "$app" do space.new --folder "$path" --tab "$slug" || fail "worktree created at $path, but opening the space failed"
 fi
 echo "done"
