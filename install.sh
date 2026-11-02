@@ -56,6 +56,12 @@ if [ "${HERDR_SKIP_PLUGINS:-0}" = 1 ]; then
 fi
 
 echo "==> plugins (third-party build steps run as you; see plugins.txt)"
+# Some plugins build with cargo, and their dependencies can need a newer Rust than a
+# pinned rustup default (1.84 cannot build edition-2024 crates). Build plugins with the
+# installed stable toolchain without changing the default.
+if command -v rustup >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q '^stable'; then
+  export RUSTUP_TOOLCHAIN=stable
+fi
 installed="$(herdr plugin list 2>/dev/null || true)"
 grep -vE '^[[:space:]]*(#|$)' "$repo_dir/plugins.txt" | while read -r id source ref _; do
   if printf '%s\n' "$installed" | grep -qwF -- "$id"; then
