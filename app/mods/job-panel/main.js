@@ -139,6 +139,7 @@ export default class JobPanel extends View {
     this.space = undefined;
     this.view = undefined; // { run, rows, focusedKey }
     this.open = new Set();
+    this.allChecks = new Set(); // rows showing passed checks too
     this.finished = new Map(); // run name -> true | false | null
     this.showFinished = false;
     this.reload(cx, true);
@@ -329,15 +330,25 @@ export default class JobPanel extends View {
         // The orchestrator's claim
         .when(Boolean(r.unit), (el) => el.child(div().text_size(11.5).text_color(t.muted).whitespace_normal().child(
           `${vsha ? `verified ${vsha.slice(0, 7)}` : "not verified"} — ${short(r.unit.status ?? "", isOpen ? 400 : 110)}`)))
-        // Mismatches and failures
-        .children(probs.map(([text, sev], k) => div().id(`p-${i}-${k}`).text_size(11.5).whitespace_normal()
+        // Mismatches and failures (an expanded row lists failing checks itself)
+        .children(probs.filter(([text]) => !(isOpen && text.startsWith("failing:"))).map(([text, sev], k) => div().id(`p-${i}-${k}`).text_size(11.5).whitespace_normal()
           .text_color(sev === "bad" ? t.blocked : t.muted).child(`⚠ ${text}`)))
-        // Expanded: every check
-        .when(isOpen && Boolean(pr), (el) => el.child(v_flex().gap(2).pt(4).children(
-          pr.checks.filter((c) => c.result !== "skip").map((c, k) =>
-            h_flex().id(`c-${i}-${k}`).gap(6).text_size(11.5)
-              .child(div().w(12).text_color(mark[c.result][1]).child(mark[c.result][0]))
-              .child(div().truncate().text_color(c.result === "fail" ? t.foreground : t.muted).child(c.name))))));
+        // Expanded: failing and running checks by name; passed and skipped fold into one line
+        // (click it to list them too).
+        .when(isOpen && Boolean(pr), (el) => {
+          const all = this.allChecks.has(r.key);
+          const listed = pr.checks.filter((c) => all ? c.result !== "skip" : c.result === "fail" || c.result === "pending");
+          const quiet = (counts.pass ?? 0) + (counts.skip ?? 0);
+          return el.child(v_flex().gap(2).pt(4)
+            .children(listed.map((c, k) =>
+              h_flex().id(`c-${i}-${k}`).gap(6).text_size(11.5)
+                .child(div().w(12).text_color(mark[c.result][1]).child(mark[c.result][0]))
+                .child(div().truncate().text_color(c.result === "fail" ? t.foreground : t.muted).child(c.name))))
+            .when(quiet > 0, (el) => el.child(
+              div().id(`quiet-${i}`).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+                .on_click((_e, cx) => { all ? this.allChecks.delete(r.key) : this.allChecks.add(r.key); cx.stop_propagation(); cx.notify(); })
+                .child(all ? "hide passed checks" : `✓ ${counts.pass ?? 0} passed (show) · ${counts.skip ?? 0} skipped`))));
+        });
     };
 
     return root.child(head)
