@@ -1,6 +1,8 @@
 // New task worktree (cmux-config's Cmd-N, for the Herdr app).
 // Type a task name; creates <prefix>/<slug> from the freshly fetched remote default branch
-// in ../<repo>-worktrees/<slug>, then opens a new space there (it nests under the repo).
+// in ../<repo>-worktrees/<slug>, then opens it as a new space (mode "space", Cmd-N: one job)
+// or as a tab named <slug> in the current space (mode "tab", Cmd-Shift-T: a worker in the job).
+// mods/task-worktree-tab is this file with its last line set to make("tab") (mods cannot import across folders).
 // Per-repo overrides: git config herdr.branchPrefix / herdr.worktreeRoot / herdr.worktreeBase
 // (cmux.* keys are read too). Existing branches or paths are refused; nothing is ever removed.
 // The built-in "worktree" mod (space menu) still opens and removes worktrees.
@@ -71,14 +73,15 @@ async function resolve(folder) {
   return { top: top.out, main, name, prefix, root, base, baseRemote };
 }
 
-export default class TaskWorktree extends View {
+export function make(mode) {
+  return class TaskWorktree extends View {
   init(_props, cx) {
     this.text = "";
     this.repo = undefined; // undefined: looking, null: not in git
     this.busy = false;
     this.status = "";
     this.error = "";
-    this.input = InputState.new({ value: "", placeholder: "task name, e.g. ticket search timeout" });
+    this.input = InputState.new({ value: "", placeholder: mode === "tab" ? "worker name, e.g. ratelimits-worker1" : "task name, e.g. ticket search timeout" });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = ""; cx.notify(); });
     this.input.on("submit", (_e, cx) => { if (!this.busy && this.repo) cx.spawn(async (cx) => this.work(cx)); });
     this.input.focus();
@@ -117,8 +120,9 @@ export default class TaskWorktree extends View {
       await exec("mkdir", ["-p", r.root]);
       const add = await git(r.top, ["worktree", "add", "--quiet", "-b", p.branch, p.path, r.base]);
       if (!add.ok) throw add.err || "git worktree add failed.";
+      if (mode === "tab") run("tab.new", { name: p.slug, folder: p.path });
       // Unnamed: the space is called after its folder (the slug) and nests under the repo.
-      run("space.new", { folder: p.path });
+      else run("space.new", { folder: p.path });
       closeOverlay(props()?.overlay);
     } catch (e) {
       this.error = String(e);
@@ -145,7 +149,7 @@ export default class TaskWorktree extends View {
       .gap(10)
       .bg(t.popover)
       .text_size(13)
-      .child(div().font_semibold().text_color(t.foreground).child(r ? `New task worktree of ${r.name}` : "New task worktree"))
+      .child(div().font_semibold().text_color(t.foreground).child(mode === "tab" ? `New worker tab${r ? ` (${r.name} worktree)` : ""}` : r ? `New task space of ${r.name}` : "New task space"))
       .when(Boolean(r), (el) =>
         el.child(
           Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1)
@@ -161,4 +165,7 @@ export default class TaskWorktree extends View {
         ),
       );
   }
+  };
 }
+
+export default make("space");
