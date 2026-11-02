@@ -2,6 +2,7 @@
 // Type a task name; creates <prefix>/<slug> from the freshly fetched remote default branch
 // in ../<repo>-worktrees/<slug>, then opens it as a new space (mode "space", Cmd-N: one job)
 // or as a tab named <slug> in the current space (mode "tab", Cmd-Shift-T: a worker in the job).
+// Either way claude starts in it, with the optional first message from the second field.
 // mods/task-worktree-tab is this file with its last line set to make("tab") (mods cannot import across folders).
 // Per-repo overrides: git config herdr.branchPrefix / herdr.worktreeRoot / herdr.worktreeBase
 // (cmux.* keys are read too). Existing branches or paths are refused; nothing is ever removed.
@@ -86,8 +87,15 @@ export function make(mode) {
     this.input = InputState.new({ value: "", placeholder: mode === "tab" ? "worker name, e.g. ratelimits-worker1" : "task name, e.g. ticket search timeout" });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = ""; cx.notify(); });
     this.input.on("submit", (_e, cx) => { if (!this.busy && this.repo) cx.spawn(async (cx) => this.work(cx)); });
+    // Optional first message for the claude that starts in the new tab (Tab switches fields).
+    this.message = "";
+    this.msgInput = InputState.new({ value: "", placeholder: mode === "tab" ? "first message for claude (optional)" : "first message for claude (optional), e.g. /orchestrate …" });
+    this.msgInput.on("change", (_e, cx) => { this.message = this.msgInput.value(); cx.notify(); });
+    this.msgInput.on("submit", (_e, cx) => { if (!this.busy && this.repo) cx.spawn(async (cx) => this.work(cx)); });
+    this.inMessage = false;
+    this.handle = cx.focus_handle();
     this.input.focus();
-    cx.timer.after(600, () => this.input.focus());
+    cx.timer.after(600, () => (this.inMessage ? this.msgInput : this.input).focus());
     cx.spawn(async (cx) => {
       this.folder = startFolder();
       try { this.repo = await resolve(this.folder); } catch (e) { this.repo = null; this.error = String(e); }
@@ -117,7 +125,9 @@ export function make(mode) {
       // itself when done, so the dialog closes now and several creations can queue up.
       // The tab goes to the space that was focused at Enter, even if focus moves meanwhile.
       step("Starting…");
-      const args = [mode, focused()?.space ?? "-", r.top, r.common, p.branch, p.path, r.base, r.baseRemote ?? "-", p.slug];
+      const task = this.message.trim();
+      // The task travels as a JSON string: herdr-app do parses JSON-looking values.
+      const args = [mode, focused()?.space ?? "-", r.top, r.common, p.branch, p.path, r.base, r.baseRemote ?? "-", p.slug, task ? JSON.stringify(task) : "-"];
       const started = await exec("sh", ["-c", 'nohup sh "$0" "$@" >/dev/null 2>&1 </dev/null &', CREATE_SH, ...args]);
       if (started.code !== 0) throw `Could not start create.sh: ${(started.stderr ?? "").trim()}`;
       notify({ title: `Creating ${p.slug}…`, body: `${p.branch} from ${r.base}`, level: "info", timeout: 4000 });
@@ -142,6 +152,14 @@ export function make(mode) {
     const detail = v_flex().gap(2).children(lines.map((l) => div().truncate().child(l)));
     return v_flex()
       .id("task-worktree")
+      .track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        if (e.key !== "tab") return;
+        this.inMessage = !this.inMessage;
+        (this.inMessage ? this.msgInput : this.input).focus();
+        cx.stop_propagation();
+        cx.notify();
+      })
       .size_full()
       .p(16)
       .gap(10)
@@ -151,7 +169,10 @@ export function make(mode) {
       .when(Boolean(r), (el) =>
         el.child(
           Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1)
-            .border_color(t.accent).bg(t.background).text_color(t.foreground),
+            .border_color(this.inMessage ? t.input : t.accent).bg(t.background).text_color(t.foreground),
+        ).child(
+          Input.new(this.msgInput).h(32).px(10).items_center().rounded(6).border(1)
+            .border_color(this.inMessage ? t.accent : t.input).bg(t.background).text_color(t.foreground),
         ),
       )
       .child(div().text_color(t.muted).font_family("Menlo").child(detail))
@@ -159,7 +180,7 @@ export function make(mode) {
       .child(div().flex_1())
       .child(
         div().text_size(11).text_color(t.dim).child(
-          this.busy ? this.status || "working…" : r ? "↵ create · esc cancel" : "esc close",
+          this.busy ? this.status || "working…" : r ? "↵ create and start claude · tab: message · esc cancel" : "esc close",
         ),
       );
   }
