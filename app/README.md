@@ -12,7 +12,11 @@ Not wired into install.sh yet.
   background (one at a time per repo, so several can queue), then opens the space or tab.
   Failures post a macOS notification; logs are in `~/.local/state/herdr-task-worktree/`.
   `./install-mods.sh` installs both; `task-worktree-tab` is generated from the same file.
+- `mods/worktree-prune/`: Cmd-Alt-K cleans up the focused repo's worktrees. Merged-and-clean
+  ones start selected; worktrees with uncommitted changes cannot be selected. Removing one
+  closes its tabs, runs `git worktree remove` (no --force), and deletes the branch only if
+  its PR merged.
 - `~/.config/herdr-app/keys.json` (global section):
   `"cmd-n": "mod.open:task-worktree"`, `"cmd-shift-n": "space.new"`,
-  `"cmd-shift-t": "mod.open:task-worktree-tab"`.
+  `"cmd-shift-t": "mod.open:task-worktree-tab"`, `"cmd-alt-k": "mod.open:worktree-prune"`.
 - `~/.config/herdr-app/settings.json`: `"sounds": {"enabled": false}`.
