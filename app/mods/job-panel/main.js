@@ -143,7 +143,9 @@ export default class JobPanel extends View {
       this.space = space;
       this.cwd = focusedCwd;
       const runs = await listRuns();
-      const keys = [...new Set(cwds.map((c) => c.split("/").slice(-2).join("/")))].filter((k) => k.includes("/"));
+      // Match runs by task worktrees only ("<repo>-worktrees/<name>"): the main checkout's
+      // path appears in nearly every state.md, so it would match whichever run came first.
+      const keys = [...new Set(cwds.map((c) => c.split("/").slice(-2).join("/")))].filter((k) => /-?worktrees\//.test(k));
       const read = async (r) => (await readTextFile(`${r.dir}/state.md`).catch(() => null)) ?? "";
       let run = runs.find((r) => r.name === this.pinned) ?? null;
       if (!run) {
@@ -269,6 +271,10 @@ export default class JobPanel extends View {
     };
 
     return root.child(head)
+      .child(div().text_size(11).text_color(t.dim).child(
+        this.pinned ? "RECENT RUNS · showing the one you picked (click it again to unpick)"
+        : v.run ? "RECENT RUNS · showing the run for this space (click another to view it)"
+        : "RECENT RUNS · none matches this space (click one to view it)"))
       .child(h_flex().gap(4).flex_wrap().children(chips))
       .child(div().text_size(11).text_color(t.dim).child(
         v.run ? `${v.run.name} · state.md ${ago(v.run.mtime)} · GitHub ${v.at.toLocaleTimeString()}`

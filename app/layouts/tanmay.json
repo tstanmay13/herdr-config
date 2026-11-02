@@ -190,16 +190,6 @@
         }
       ],
       "resizable": false
-    },
-    {
-      "id": "b9015042b10965f93c20dacca46ae763a",
-      "type": "block",
-      "content": {
-        "mod": "job-panel"
-      },
-      "size": {
-        "px": 320
-      }
     }
   ],
   "background": "canvas",
