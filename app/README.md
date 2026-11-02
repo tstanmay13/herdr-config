@@ -43,6 +43,10 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   tabs' PRs. The focused tab's unit is highlighted and expanded with every check; click a
   row to expand it, click the PR number to open it. Refreshes on space change, when a
   `state.md` changes, and every 60 s.
+  Run chips hide finished runs ("+N finished" shows them): a run is finished when its
+  `state.md` has orchestrate's `**Closed:**` line, when every unit's PR is merged or closed,
+  or when every PR it opened is merged or closed and `state.md` has been quiet for 3 days
+  (units that never got a PR). Merged/closed PR states are cached across restarts.
 
 ## Layout
 

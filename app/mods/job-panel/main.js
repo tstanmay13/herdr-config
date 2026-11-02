@@ -92,6 +92,37 @@ function checks(rollup) {
   }).sort((a, b) => order.indexOf(a.result) - order.indexOf(b.result));
 }
 
+// A run is finished when state.md has orchestrate's "**Closed:**" line, or every unit has a
+// PR and all of them are merged or closed. Merged/closed states never change, so they are
+// remembered across restarts (localStorage); open ones are asked again next time.
+// Returns true, false, "partial" (every PR it opened is merged or closed, but some units never
+// got a PR: parked or never dispatched), or null (no units, or gh failed).
+function loadStates() {
+  try { return new Map(JSON.parse(localStorage.getItem("prStates") ?? "[]")); } catch { return new Map(); }
+}
+function saveStates(m) {
+  try { localStorage.setItem("prStates", JSON.stringify([...m].filter(([, v]) => v !== "OPEN"))); } catch {}
+}
+async function runFinished(text, cwd, states) {
+  if (/^\*\*Closed:\*\*/m.test(text)) return true;
+  const us = units(text);
+  if (!us.length || !cwd) return null;
+  let missing = false;
+  for (const u of us) {
+    const n = prNumber(u.pr);
+    if (!n) { missing = true; continue; }
+    let st = states.get(n);
+    if (!st || st === "OPEN") {
+      const r = await sh("gh", ["pr", "view", n, "--json", "state", "-q", ".state"], cwd);
+      if (!r.ok) return null;
+      st = r.out;
+      states.set(n, st);
+    }
+    if (st === "OPEN") return false;
+  }
+  return missing ? "partial" : true;
+}
+
 async function prView(ref, cwd) {
   const r = await sh("gh", ["pr", "view", ...(ref ? [String(ref)] : []), "--json", FIELDS], cwd);
   if (!r.ok) return { error: /no pull requests found/i.test(r.err) ? null : r.err.split("\n")[0] };
@@ -108,6 +139,8 @@ export default class JobPanel extends View {
     this.space = undefined;
     this.view = undefined; // { run, rows, focusedKey }
     this.open = new Set();
+    this.finished = new Map(); // run name -> true | false | null
+    this.showFinished = false;
     this.reload(cx, true);
     cx.timer.every(2000, (cx) => {
       const s = focused()?.space ?? null;
@@ -184,7 +217,35 @@ export default class JobPanel extends View {
       for (const r of shown) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
 
       this.runs = runs;
+      if (withGitHub && repoCwd) this.checkFinished(cx, runs.slice(0, 12), repoCwd);
       this.view = { run, rows: shown, focusedBranch, at: new Date() };
+      cx.notify();
+    });
+  }
+
+  // Background: which recent runs are finished (see runFinished). Updates the chips when done.
+  checkFinished(cx, runs, repoCwd) {
+    if (this.checking) return;
+    this.checking = true;
+    cx.spawn(async (cx) => {
+      const states = loadStates();
+      try {
+        for (const r of runs) {
+          const text = (await readTextFile(`${r.dir}/state.md`).catch(() => null)) ?? "";
+          // A run's PRs live in its own repo: use one of its worktrees if it still exists.
+          let cwd = repoCwd;
+          for (const m of text.matchAll(/(\/Users\/[^\s|]+-worktrees\/[^\s|]+)/g)) {
+            if ((await sh("test", ["-d", m[1]])).ok) { cwd = m[1]; break; }
+          }
+          // "partial" counts as finished once state.md has been quiet for 3 days: a live run
+          // either has an open PR or keeps writing state.md.
+          const f = await runFinished(text, cwd, states);
+          this.finished.set(r.name, f === "partial" ? (Date.now() / 1000 - r.mtime > 3 * 86400 ? true : null) : f);
+        }
+      } finally {
+        saveStates(states);
+        this.checking = false;
+      }
       cx.notify();
     });
   }
@@ -218,13 +279,22 @@ export default class JobPanel extends View {
     const head = div().text_size(11).text_color(t.dim).child("JOB");
     if (v === undefined) return root.child(head).child(div().text_color(t.muted).child("Loading…"));
 
-    const chips = this.runs.slice(0, 6).map((x, i) =>
+    // Hide finished runs unless asked; the run shown here always keeps its chip.
+    const hidden = this.runs.filter((x) => this.finished.get(x.name) === true && x.name !== v.run?.name);
+    const listed = this.runs.filter((x) => this.showFinished || !hidden.includes(x)).slice(0, this.showFinished ? 12 : 6);
+    const chips = listed.map((x, i) =>
       div().id(`run-${i}`).px(6).py(2).rounded(5).text_size(11)
         .bg(x.name === v.run?.name ? t.selected : t.raised)
         .text_color(x.name === v.run?.name ? t.foreground : t.muted)
         .hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { this.pinned = this.pinned === x.name ? null : x.name; this.open = new Set(); this.reload(cx, true); })
-        .child(short(x.name.replace(/^\d{4}-\d{2}-\d{2}-/, ""), 22)));
+        .child(`${this.finished.get(x.name) === true ? "✓ " : ""}${short(x.name.replace(/^\d{4}-\d{2}-\d{2}-/, ""), 22)}`));
+    if (hidden.length) {
+      chips.push(div().id("run-finished").px(6).py(2).rounded(5).text_size(11).text_color(t.dim)
+        .hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { this.showFinished = !this.showFinished; cx.notify(); })
+        .child(this.showFinished ? "hide finished" : `+${hidden.length} finished`));
+    }
 
     const mark = { fail: ["✕", t.blocked], pending: ["●", t.working], pass: ["✓", t.done], skip: ["–", t.dim] };
     const row = (r, i) => {
