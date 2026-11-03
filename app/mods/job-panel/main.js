@@ -1,12 +1,13 @@
-// Job panel: one row per unit of the focused space's orchestrate run, putting what the
-// orchestrator recorded (state.md: verified SHA, status) next to what GitHub says now
-// (gh pr view: head SHA, checks, conflicts, review), with mismatches flagged on the row.
+// Job panel: a status board for orchestrate runs. One line per unit with one status word:
+// needs-you, ready, ready?, working, waiting, paused, merged. The orchestrator writes the word at
+// the start of the unit's state.md status cell (older runs: guessed from the text); GitHub
+// decides merged, and "ready" shows only when GitHub agrees (head is the verified SHA, CI green,
+// no conflicts), else "ready?" with the reason.
 //
-// Run: the one whose state.md names a worktree open in the focused space, else none (chips pick
-// any recent run). PRs: each unit's PR column, else its branch; plus branches of open tabs that
-// are not in state.md. With no run, the space's tabs' PRs alone (a single-task space).
-// The focused tab's unit is highlighted and expanded; click a row to expand or collapse it.
-// Refreshes on space change, when a state.md changes, and every 60 s.
+// Top: "Needs you", every needs-you and ready unit across all unfinished runs (from cached PR
+// data, no extra GitHub calls), plus each run's "**Needs you:**" line. Below: the focused
+// space's run (or a picked chip), merged units folded at the bottom. Click a row for the
+// orchestrator's note and the red checks' names; click the PR number to open it.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -138,6 +139,43 @@ function slim(pr) {
 }
 const done = (pr) => pr && pr.state !== "OPEN"; // merged/closed never change: no refetch
 
+
+// ---------- status words ----------
+
+const WORDS = ["needs-you", "ready", "working", "waiting", "paused", "merged", "dropped"];
+const RANK = { "needs-you": 0, ready: 1, "ready?": 1, open: 2, working: 2, waiting: 3, paused: 4, dropped: 5, closed: 5, merged: 6 };
+
+// The orchestrator's word for a unit: the leading word of the status cell, or, for runs written
+// before the word list existed, a guess from the text. Returns { word, rest }.
+function orchWord(status) {
+  const s = String(status ?? "").trim();
+  const m = /^(needs-you|ready|working|waiting|paused|merged|dropped)\b\s*[:;,-]?\s*/i.exec(s);
+  if (m) return { word: m[1].toLowerCase(), rest: s.slice(m[0].length) };
+  const guess =
+    /^merged\b/i.test(s) ? "merged"
+    : /^(ready\b|merge gate met|ready gate passed)/i.test(s) || /\bmerge gate met\b/i.test(s) ? "ready"
+    : /\b(needs (you|tanmay)|ask(ing)? tanmay|decision needed|question for tanmay)\b/i.test(s) ? "needs-you"
+    : /^(paused|on hold|hold\b)|\bpaused\b|\bon hold\b/i.test(s) ? "paused"
+    : /^(waiting|after\b|blocked on|waits? (for|on))/i.test(s) ? "waiting"
+    : /^(dropped|abandoned|closed)\b/i.test(s) ? "dropped"
+    : "working";
+  return { word: guess, rest: s };
+}
+
+// What GitHub says about an open PR: green (mergeable now) and, if not, why not.
+function ghReady(pr) {
+  const fail = pr.checks.filter((c) => c.result === "fail");
+  const pend = pr.checks.filter((c) => c.result === "pending").length;
+  const why =
+    pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY" ? "conflicts"
+    : fail.length ? `${fail.length} check${fail.length > 1 ? "s" : ""} red`
+    : pend ? "CI running"
+    : pr.isDraft ? "draft"
+    : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes requested"
+    : null;
+  return { green: !why, why, fail, approval: pr.reviewDecision === "REVIEW_REQUIRED" ? "needs approval" : null };
+}
+
 // ---------- the panel ----------
 
 export default class JobPanel extends View {
@@ -154,8 +192,11 @@ export default class JobPanel extends View {
     this.fetching = 0;
     this.seq = 0;
     this.open = new Set();
-    this.allChecks = new Set(); // rows showing passed checks too
     this.finished = new Map(); // run name -> true | false | null
+    this.states = loadStates(); // PR number -> MERGED | CLOSED (final states only)
+    this.inbox = []; // [{ run, unit row }] across unfinished runs
+    this.runAsks = []; // [{ run, text }] from **Needs you:** lines
+    this.showDone = false;
     this.showFinished = false;
     this.reload(cx, true);
     // A cheap comparison; nothing redraws unless the space or folder really changed.
@@ -251,6 +292,21 @@ export default class JobPanel extends View {
       }
       const us = run ? units(run.text ?? (await read(run))) : [];
 
+      // Needs-you and ready units across unfinished runs (state.md only; PR data from the cache).
+      const inbox = [], asks = [];
+      for (const r of runs.slice(0, 12)) {
+        if (this.finished.get(r.name) === true) continue;
+        r.text = r.text ?? (await read(r));
+        const ask = /^\*\*Needs you:\*\*\s*(.+)$/m.exec(r.text);
+        if (ask) asks.push({ run: r, text: ask[1].trim() });
+        for (const u of units(r.text)) {
+          const w = orchWord(u.status).word;
+          if (w === "needs-you" || w === "ready") inbox.push({ run: r, row: { key: `u:${u.unit}`, unit: u, branch: (u.branch ?? "").split(/\s/)[0], number: prNumber(u.pr) } });
+        }
+      }
+      this.inbox = inbox;
+      this.runAsks = asks;
+
       // Branches open in this space's tabs, all at once (any one cwd per worktree is enough).
       const branchOf = await Promise.all([...cwds, focusedCwd].map(async (c) => (c ? (await sh("git", ["branch", "--show-current"], c)).out : "")));
       const tabBranches = new Map(); // branch -> a cwd on it
@@ -293,7 +349,7 @@ export default class JobPanel extends View {
     if (this.checking) return;
     this.checking = true;
     cx.spawn(async (cx) => {
-      const states = loadStates();
+      const states = this.states;
       try {
         for (const r of runs) {
           const text = (await readTextFile(`${r.dir}/state.md`).catch(() => null)) ?? "";
@@ -315,134 +371,130 @@ export default class JobPanel extends View {
     });
   }
 
-  // Problems with a row, most important first: [text, severity "bad" | "warn"].
-  problems(r) {
-    const out = [];
+  // A row's status: { word, note, color }. Merged/closed from GitHub win; "ready" only when
+  // GitHub agrees; rows with no unit get their word from GitHub alone.
+  status(r, t) {
     const pr = r.gh?.pr;
-    const vsha = sha(r.unit?.["verified tip"]);
-    const tip = sha(r.unit?.["tip"]);
-    // A merged or closed PR is history: its old checks and SHAs need no action.
-    if (pr && pr.state !== "OPEN") return r.unit || this.mode === "mine" ? [] : [["not in state.md", "warn"]];
-    if (pr) {
-      if (pr.state === "OPEN" && (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY")) out.push(["conflicts with base: no PR workflows run", "bad"]);
-      const fails = pr.checks.filter((c) => c.result === "fail");
-      if (fails.length) out.push([`failing: ${fails.slice(0, 2).map((c) => c.name).join(", ")}${fails.length > 2 ? ` +${fails.length - 2}` : ""}`, "bad"]);
-      if (r.unit && vsha && !sameSha(vsha, pr.headRefOid)) out.push([`head ${pr.headRefOid.slice(0, 7)} is not the verified ${vsha.slice(0, 7)}`, "bad"]);
-      if (r.unit && tip && !sameSha(tip, pr.headRefOid)) out.push([`state.md tip ${tip.slice(0, 7)} is behind head ${pr.headRefOid.slice(0, 7)}`, "warn"]);
-      if (pr.reviewDecision === "CHANGES_REQUESTED") out.push(["changes requested", "bad"]);
-    } else if (r.unit && r.number) {
-      out.push([r.gh?.error ? `gh: ${r.gh.error}` : `PR #${r.number} not found`, "warn"]);
+    const C = { "needs-you": t.blocked, ready: t.done, "ready?": t.working, open: t.working, working: t.working, waiting: t.muted, paused: t.muted, dropped: t.dim, closed: t.dim, merged: t.dim };
+    const out = (word, note = null) => ({ word, note, color: C[word] });
+    const final = pr && pr.state !== "OPEN" ? pr.state : this.states.get(String(r.number ?? ""));
+    if (final === "MERGED") return out("merged");
+    if (final === "CLOSED") return out("closed");
+    const gh = pr ? ghReady(pr) : null;
+    if (!r.unit) return !gh ? out("open") : gh.green ? out("ready", gh.approval) : out("open", gh.why);
+    const { word, rest } = orchWord(r.unit.status);
+    if (word === "ready") {
+      if (!gh) return out("ready?", r.number ? "PR not loaded" : "no PR");
+      const v = sha(r.unit["verified tip"]);
+      if (v && !sameSha(v, pr.headRefOid)) return out("ready?", "head moved since verify");
+      return gh.green ? out("ready", gh.approval) : out("ready?", gh.why);
     }
-    if (!r.unit && this.mode !== "mine") out.push(["not in state.md", "warn"]);
-    return out;
+    if (word === "needs-you") return out(word, short(rest, 70) || null);
+    if (word === "waiting" || word === "paused") return out(word, short(rest.replace(/^(waiting|paused)\s*/i, ""), 50) || null);
+    return out(word);
   }
 
   render() {
     const t = theme();
     const v = this.view;
     const root = v_flex().id("job-panel").size_full().p(12).gap(8).bg(t.surface).text_size(12.5);
-    const head = div().text_size(11).text_color(t.dim).child("JOB");
-    if (v === undefined) return root.child(head).child(div().text_color(t.muted).child("Loading…"));
+    const label = (s) => div().text_size(11).text_color(t.dim).child(s);
+    if (v === undefined) return root.child(label("JOB")).child(div().text_color(t.muted).child("Loading…"));
+    const runName = (name) => short(name.replace(/^\d{4}-\d{2}-\d{2}-/, ""), 22);
 
-    // Hide finished runs unless asked; the run shown here always keeps its chip.
-    const hidden = this.runs.filter((x) => this.finished.get(x.name) === true && x.name !== v.run?.name);
-    const listed = this.runs.filter((x) => this.showFinished || !hidden.includes(x)).slice(0, this.showFinished ? 12 : 6);
-    const chips = listed.map((x, i) =>
-      div().id(`run-${i}`).px(6).py(2).rounded(5).text_size(11)
-        .bg(x.name === v.run?.name ? t.selected : t.raised)
-        .text_color(x.name === v.run?.name ? t.foreground : t.muted)
-        .hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.pinned = this.pinned === x.name ? null : x.name; this.open = new Set(); this.reload(cx, true); })
-        .child(`${this.finished.get(x.name) === true ? "✓ " : ""}${short(x.name.replace(/^\d{4}-\d{2}-\d{2}-/, ""), 22)}`));
-    if (hidden.length) {
-      chips.push(div().id("run-finished").px(6).py(2).rounded(5).text_size(11).text_color(t.dim)
-        .hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => { this.showFinished = !this.showFinished; cx.notify(); })
-        .child(this.showFinished ? "hide finished" : `+${hidden.length} finished`));
-    }
-    // All my open PRs (from the background batch call), off by default.
-    chips.push(div().id("run-mine").px(6).py(2).rounded(5).text_size(11)
-      .bg(this.mode === "mine" ? t.selected : t.raised)
-      .text_color(this.mode === "mine" ? t.foreground : t.muted)
-      .hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { this.mode = this.mode === "mine" ? "job" : "mine"; cx.notify(); })
-      .child(`my open PRs${this.mine ? ` (${this.mine.length})` : ""}`));
-
-    const mark = { fail: ["✕", t.blocked], pending: ["●", t.working], pass: ["✓", t.done], skip: ["–", t.dim] };
-    const row = (r, i) => {
+    // One line: status word, name, PR number; a second line only for a short note.
+    // Expanded: the orchestrator's own note, who owns it, and the red checks by name.
+    const row = (r, id, prefix = null, onClick = null) => {
       const pr = r.gh?.pr;
-      const probs = this.problems(r);
-      const isOpen = this.open.has(r.key);
-      const focusedRow = Boolean(v.focusedBranch) && r.branch === v.focusedBranch;
-      const counts = pr ? pr.checks.reduce((m, c) => ((m[c.result] = (m[c.result] ?? 0) + 1), m), {}) : {};
-      const state = !pr ? null : pr.state === "MERGED" ? ["merged", t.done] : pr.state === "CLOSED" ? ["closed", t.muted] : pr.isDraft ? ["draft", t.muted] : ["open", t.working];
-      const review = pr && { APPROVED: ["approved", t.done], CHANGES_REQUESTED: ["changes requested", t.blocked], REVIEW_REQUIRED: ["review required", t.muted] }[pr.reviewDecision];
-      const vsha = sha(r.unit?.["verified tip"]);
+      const st = this.status(r, t);
+      const isOpen = this.open.has(r.key) && !onClick;
+      const focusedRow = !prefix && Boolean(v.focusedBranch) && r.branch === v.focusedBranch;
+      const name = r.unit?.unit || pr?.title || r.branch || `#${r.number}`;
       const who = r.unit ? [r.unit["implementer"] && `impl ${r.unit["implementer"].split(" ")[0]}`, r.unit["verifier"] && `verify ${r.unit["verifier"].split(" ")[0]}`].filter(Boolean).join(" · ") : r.branch;
-
-      return v_flex().id(`row-${i}`).p(8).gap(3).rounded(6)
+      const fails = pr && pr.state === "OPEN" ? pr.checks.filter((c) => c.result === "fail").map((c) => c.name) : [];
+      return v_flex().id(id).px(8).py(5).gap(2).rounded(6)
         .bg(focusedRow ? t.selected : t.background)
-        .border(1).border_color(probs.some((p) => p[1] === "bad") ? t.blocked : focusedRow ? t.accent : t.background)
-        .on_click((_e, cx) => { this.open.has(r.key) ? this.open.delete(r.key) : this.open.add(r.key); cx.notify(); })
-        // Name and PR number
-        .child(h_flex().gap(8).justify_between()
-          .child(div().truncate().font_semibold().text_color(t.foreground).child(r.unit?.unit || pr?.title || r.branch))
-          .when(Boolean(pr), (el) => el.child(
-            div().id(`pr-${i}`).text_color(t.accent).hover((s) => s.text_color(t.foreground))
-              .on_click((_e, cx) => { exec("open", [pr.url]); cx.stop_propagation(); })
-              .child(`#${pr.number}`))))
-        .child(div().truncate().text_size(11).text_color(t.dim).child(who))
-        // GitHub now
-        .when(Boolean(pr), (el) => el.child(h_flex().gap(8).flex_wrap().text_size(11.5)
-          .child(div().text_color(state[1]).child(state[0]))
-          .child(div().text_color(t.dim).child(pr.headRefOid.slice(0, 7)))
-          .child(div().text_color(counts.fail ? t.blocked : t.muted).child(`${counts.fail ?? 0} ✕ · ${counts.pending ?? 0} ● · ${counts.pass ?? 0} ✓`))
-          .when(Boolean(review), (el) => el.child(div().text_color(review[1]).child(review[0])))))
-        // The orchestrator's claim
-        .when(Boolean(r.unit), (el) => el.child(div().text_size(11.5).text_color(t.muted).whitespace_normal().child(
-          `${vsha ? `verified ${vsha.slice(0, 7)}` : "not verified"} — ${short(r.unit.status ?? "", isOpen ? 400 : 110)}`)))
-        // Mismatches and failures (an expanded row lists failing checks itself)
-        .children(probs.filter(([text]) => !(isOpen && text.startsWith("failing:"))).map(([text, sev], k) => div().id(`p-${i}-${k}`).text_size(11.5).whitespace_normal()
-          .text_color(sev === "bad" ? t.blocked : t.muted).child(`⚠ ${text}`)))
-        // Expanded: failing and running checks by name; passed and skipped fold into one line
-        // (click it to list them too).
-        .when(isOpen && Boolean(pr), (el) => {
-          const all = this.allChecks.has(r.key);
-          const listed = pr.checks.filter((c) => all ? c.result !== "skip" : c.result === "fail" || c.result === "pending");
-          const quiet = (counts.pass ?? 0) + (counts.skip ?? 0);
-          return el.child(v_flex().gap(2).pt(4)
-            .children(listed.map((c, k) =>
-              h_flex().id(`c-${i}-${k}`).gap(6).text_size(11.5)
-                .child(div().w(12).text_color(mark[c.result][1]).child(mark[c.result][0]))
-                .child(div().truncate().text_color(c.result === "fail" ? t.foreground : t.muted).child(c.name))))
-            .when(quiet > 0, (el) => el.child(
-              div().id(`quiet-${i}`).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
-                .on_click((_e, cx) => { all ? this.allChecks.delete(r.key) : this.allChecks.add(r.key); cx.stop_propagation(); cx.notify(); })
-                .child(all ? "hide passed checks" : `✓ ${counts.pass ?? 0} passed (show) · ${counts.skip ?? 0} skipped`))));
-        });
+        .hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => {
+          if (onClick) return onClick(cx);
+          this.open.has(r.key) ? this.open.delete(r.key) : this.open.add(r.key);
+          cx.notify();
+        })
+        .child(h_flex().gap(8)
+          .child(div().w(62).flex_none().text_size(11.5).font_semibold().text_color(st.color).child(st.word))
+          .child(div().flex_1().min_w(0).truncate().text_color(st.word === "merged" ? t.muted : t.foreground)
+            .child(prefix ? `${prefix} · ${name}` : name))
+          .when(Boolean(pr ?? r.number), (el) => el.child(
+            div().id(`${id}-pr`).flex_none().text_size(11.5).text_color(t.accent).hover((s) => s.text_color(t.foreground))
+              .on_click((_e, cx) => { if (pr) exec("open", [pr.url]); cx.stop_propagation(); })
+              .child(`#${pr?.number ?? r.number}`))))
+        .when(Boolean(st.note), (el) => el.child(div().pl(70).truncate().text_size(11).text_color(t.muted).child(st.note)))
+        .when(isOpen, (el) => el.child(v_flex().pl(70).gap(2).pt(2).text_size(11).text_color(t.muted)
+          .when(Boolean(r.unit?.status), (el) => el.child(div().whitespace_normal().child(r.unit.status)))
+          .when(Boolean(who), (el) => el.child(div().truncate().text_color(t.dim).child(who)))
+          .when(fails.length > 0, (el) => el.child(div().whitespace_normal().text_color(t.dim).child(`red: ${fails.join(", ")}`)))));
     };
 
-    // Rows: the job's units and tabs with a PR, or every open PR of mine.
-    const rows = this.mode === "mine"
+    // Needs you: across all unfinished runs, newest run first.
+    for (const x of this.inbox) x.row.gh = this.cached(x.row);
+    const inbox = this.inbox.filter((x) => ["needs-you", "ready", "ready?"].includes(this.status(x.row, t).word))
+      .sort((a, b) => RANK[this.status(a.row, t).word] - RANK[this.status(b.row, t).word]);
+    const pick = (name, key) => (cx) => { this.mode = "job"; this.pinned = name; this.open = new Set(key ? [key] : []); this.reload(cx, true); };
+    const inboxEls = [
+      ...this.runAsks.map((a, i) => h_flex().id(`ask-${i}`).px(8).py(5).gap(8).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => pick(a.run.name, null)(cx))
+        .child(div().w(62).flex_none().text_size(11.5).font_semibold().text_color(t.blocked).child("needs-you"))
+        .child(div().flex_1().min_w(0).whitespace_normal().text_color(t.foreground).child(`${runName(a.run.name)} · ${a.text}`))),
+      ...inbox.map((x, i) => row(x.row, `in-${i}`, runName(x.run.name), pick(x.run.name, x.row.key))),
+    ];
+
+    // Run chips (finished runs hidden unless asked) and the "my open PRs" switch.
+    const hidden = this.runs.filter((x) => this.finished.get(x.name) === true && x.name !== v.run?.name);
+    const listed = this.runs.filter((x) => this.showFinished || !hidden.includes(x)).slice(0, this.showFinished ? 12 : 6);
+    const chip = (id, on, text, click) => div().id(id).px(6).py(2).rounded(5).text_size(11)
+      .bg(on ? t.selected : t.raised).text_color(on ? t.foreground : t.muted).hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => click(cx)).child(text);
+    const chips = listed.map((x, i) => chip(`run-${i}`, this.mode === "job" && x.name === v.run?.name,
+      `${this.finished.get(x.name) === true ? "✓ " : ""}${runName(x.name)}`,
+      (cx) => { this.mode = "job"; this.pinned = this.pinned === x.name ? null : x.name; this.open = new Set(); this.reload(cx, true); }));
+    if (hidden.length) chips.push(div().id("run-finished").px(6).py(2).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => { this.showFinished = !this.showFinished; cx.notify(); })
+      .child(this.showFinished ? "hide finished" : `+${hidden.length} finished`));
+    chips.push(chip("run-mine", this.mode === "mine", `my open PRs${this.mine ? ` (${this.mine.length})` : ""}`,
+      (cx) => { this.mode = this.mode === "mine" ? "job" : "mine"; cx.notify(); }));
+
+    // The run's rows, by status; merged/closed/dropped folded at the bottom.
+    const rows = (this.mode === "mine"
       ? (this.mine ?? []).map((n) => ({ key: `p:${n}`, unit: null, number: n, gh: this.prs.get(n), branch: this.prs.get(n)?.pr.headRefName }))
-      : v.rows.filter((r) => r.unit || r.gh?.pr);
-    const ats = rows.map((r) => r.gh?.at).filter(Boolean);
+      : v.rows.filter((r) => r.unit || r.gh?.pr))
+      .map((r) => ({ r, w: this.status(r, t).word }))
+      .sort((a, b) => RANK[a.w] - RANK[b.w]);
+    const live = rows.filter((x) => RANK[x.w] < 5);
+    const done = rows.filter((x) => RANK[x.w] >= 5);
+    const counts = live.reduce((m, x) => ((m[x.w] = (m[x.w] ?? 0) + 1), m), {});
+    const summary = Object.entries(counts).map(([w, n]) => `${n} ${w}`).join(" · ") || "nothing open";
+
+    const ats = rows.map((x) => x.r.gh?.at).filter(Boolean);
     const fresh = ats.length ? `GitHub ${ago(Math.min(...ats) / 1000)}` : "GitHub not loaded yet";
     const busy = this.fetching > 0 ? " · updating…" : "";
 
-    return root.child(head)
-      .child(div().text_size(11).text_color(t.dim).child(
-        this.mode === "mine" ? "MY OPEN PRS · click the chip again to go back to the job"
-        : this.pinned ? "RECENT RUNS · showing the one you picked (click it again to unpick)"
-        : v.run ? "RECENT RUNS · showing the run for this space (click another to view it)"
-        : "RECENT RUNS · none matches this space (click one to view it)"))
+    return root
+      .child(label(`NEEDS YOU${inboxEls.length ? ` (${inboxEls.length})` : ""} · all running jobs`))
+      .child(v_flex().gap(3).children(inboxEls.length ? inboxEls : [div().px(8).text_size(11.5).text_color(t.muted).child("Nothing needs you right now.")]))
+      .child(div().h(1).bg(t.raised))
       .child(h_flex().gap(4).flex_wrap().children(chips))
-      .child(div().text_size(11).text_color(t.dim).child(
-        this.mode === "mine" ? `${rows.length} open · ${fresh}${busy}`
-        : v.run ? `${v.run.name} · state.md ${ago(v.run.mtime)} · ${fresh}${busy}`
-        : `No orchestrate run for this space · ${fresh}${busy}`))
-      .when(rows.length === 0, (el) => el.child(div().text_color(t.muted).child(
-        this.mode === "mine" ? (this.mine ? "No open PRs." : "Loading your PRs…") : "No PRs for the branches open here.")))
-      .child(v_flex().id("rows").flex_1().min_h(0).overflow_y_scrollbar().gap(6).children(rows.map(row)));
+      .child(label(
+        this.mode === "mine" ? `MY OPEN PRS · ${summary} · ${fresh}${busy}`
+        : v.run ? `${runName(v.run.name).toUpperCase()} · ${summary} · ${fresh}${busy}`
+        : `NO RUN FOR THIS SPACE · ${fresh}${busy}`))
+      .child(v_flex().id("rows").flex_1().min_h(0).overflow_y_scrollbar().gap(3)
+        .when(rows.length === 0, (el) => el.child(div().px(8).text_color(t.muted).child(
+          this.mode === "mine" ? (this.mine ? "No open PRs." : "Loading your PRs…") : "No PRs for the branches open here.")))
+        .children(live.map((x, i) => row(x.r, `row-${i}`)))
+        .when(done.length > 0, (el) => el
+          .child(div().id("done-toggle").px(8).py(4).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+            .on_click((_e, cx) => { this.showDone = !this.showDone; cx.notify(); })
+            .child(`${this.showDone ? "▾" : "▸"} ${done.length} merged or closed`))
+          .when(this.showDone, (el) => el.children(done.map((x, i) => row(x.r, `done-${i}`))))));
   }
 }

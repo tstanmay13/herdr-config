@@ -34,24 +34,22 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   uncommitted changes and open tabs. Merged-and-clean ones start selected; ones with
   uncommitted changes cannot be selected. Removing closes the tabs inside, runs
   `git worktree remove` (never `--force`), and deletes the branch only if its PR merged.
-- `job-panel`: one row per unit of the focused space's orchestrate run (the run whose
-  `state.md` names a worktree open in the space; chips pick another). Each row puts the
-  orchestrator's claim (verified SHA, status note) next to GitHub now (`gh pr view`: head SHA,
-  checks, conflicts, review) and flags mismatches in red: failing checks, conflicts, head is
-  not the verified SHA, changes requested. Merged or closed PRs are not flagged. Tabs whose
-  branch has a PR but no unit show as "not in state.md"; a space with no run shows just its
-  tabs' PRs. The focused tab's unit is highlighted and expanded with every check; click a
-  row to expand it, click the PR number to open it. Refreshes on space change, when a
-  `state.md` changes, and every 60 s.
-  Run chips hide finished runs ("+N finished" shows them): a run is finished when its
-  `state.md` has orchestrate's `**Closed:**` line, when every unit's PR is merged or closed,
-  or when every PR it opened is merged or closed and `state.md` has been quiet for 3 days
-  (units that never got a PR). Merged/closed PR states are cached across restarts.
+- `job-panel`: a status board for orchestrate runs, one line per unit with one word:
+  `needs-you`, `ready`, `ready?`, `working`, `waiting`, `paused`, `merged`. The orchestrator
+  writes the word at the start of the unit's `status` cell in `state.md` (orchestrate's
+  `tanmay/status-words` branch); older runs get a guess from the text. GitHub decides merged,
+  and `ready` shows only when GitHub agrees: the head is the verified SHA, every check passed,
+  no conflicts. Otherwise the row says `ready?` and why (head moved, 2 checks red, CI running).
+  The top section, "Needs you", lists every needs-you and ready unit across all unfinished runs,
+  plus any run's `**Needs you:**` line; click one to jump to its run. Below it is the focused
+  space's run (chips pick another; "my open PRs" lists every open PR of mine), with merged and
+  closed units folded at the bottom. Click a row for the orchestrator's note and the names of
+  red checks; click the PR number to open it.
+  Finished runs are hidden ("+N finished" shows them): `**Closed:**` in `state.md`, every
+  unit's PR merged or closed, or every PR merged or closed and `state.md` quiet for 3 days.
   Speed: PR data is cached across restarts and each space's last view is kept, so switching
-  spaces shows rows at once (the header says how old the GitHub data is) and they update in
-  place. Rows refetch in parallel; merged/closed PRs are never refetched. One background
-  `gh pr list --author @me` call (every 45 s at most) refreshes all open PRs and feeds the
-  "my open PRs" chip, which lists every open PR of mine.
+  spaces shows rows at once; they refetch in parallel (merged/closed never refetch). One
+  background `gh pr list --author @me` call, every 45 s at most, refreshes all open PRs.
 
 ## Layout
 
