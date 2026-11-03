@@ -47,6 +47,11 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   `state.md` has orchestrate's `**Closed:**` line, when every unit's PR is merged or closed,
   or when every PR it opened is merged or closed and `state.md` has been quiet for 3 days
   (units that never got a PR). Merged/closed PR states are cached across restarts.
+  Speed: PR data is cached across restarts and each space's last view is kept, so switching
+  spaces shows rows at once (the header says how old the GitHub data is) and they update in
+  place. Rows refetch in parallel; merged/closed PRs are never refetched. One background
+  `gh pr list --author @me` call (every 45 s at most) refreshes all open PRs and feeds the
+  "my open PRs" chip, which lists every open PR of mine.
 
 ## Layout
 

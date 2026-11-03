@@ -123,12 +123,20 @@ async function runFinished(text, cwd, states) {
   return missing ? "partial" : true;
 }
 
-async function prView(ref, cwd) {
-  const r = await sh("gh", ["pr", "view", ...(ref ? [String(ref)] : []), "--json", FIELDS], cwd);
-  if (!r.ok) return { error: /no pull requests found/i.test(r.err) ? null : r.err.split("\n")[0] };
-  const pr = JSON.parse(r.out);
-  return { pr: { ...pr, checks: checks(pr.statusCheckRollup) } };
+// ---------- PR cache ----------
+// number -> { pr, at }. Shared by every refresh and saved across restarts, so a space shows its
+// PRs at once (possibly a minute old) while fresh data loads. Checks are stored already sorted.
+function loadPrCache() {
+  try { return new Map(JSON.parse(localStorage.getItem("prCache") ?? "[]")); } catch { return new Map(); }
 }
+function savePrCache(m) {
+  try { localStorage.setItem("prCache", JSON.stringify([...m].sort((x, y) => x[1].at - y[1].at).slice(-150))); } catch {}
+}
+function slim(pr) {
+  const { statusCheckRollup, ...rest } = pr;
+  return { ...rest, checks: checks(statusCheckRollup) };
+}
+const done = (pr) => pr && pr.state !== "OPEN"; // merged/closed never change: no refetch
 
 // ---------- the panel ----------
 
@@ -136,14 +144,22 @@ export default class JobPanel extends View {
   init(_props, cx) {
     this.runs = [];
     this.pinned = null;
+    this.mode = "job"; // "job": the space's run; "mine": all my open PRs
     this.space = undefined;
-    this.view = undefined; // { run, rows, focusedKey }
+    this.view = undefined; // { run, rows, focusedBranch }
+    this.spaceViews = new Map(); // space id -> its last view, shown at once on switching back
+    this.prs = loadPrCache();
+    this.mine = null; // numbers of my open PRs, from the batch call
+    this.mineAt = 0;
+    this.fetching = 0;
+    this.seq = 0;
     this.open = new Set();
     this.allChecks = new Set(); // rows showing passed checks too
     this.finished = new Map(); // run name -> true | false | null
     this.showFinished = false;
     this.reload(cx, true);
-    cx.timer.every(2000, (cx) => {
+    // A cheap comparison; nothing redraws unless the space or folder really changed.
+    cx.timer.every(300, (cx) => {
       const s = focused()?.space ?? null;
       const c = focused()?.cwd ?? null;
       if (s !== this.space) { this.pinned = null; this.open = new Set(); this.reload(cx, true); }
@@ -170,11 +186,56 @@ export default class JobPanel extends View {
     });
   }
 
-  // withGitHub: false re-reads only state.md and keeps the last GitHub data.
+  cached(r) {
+    if (r.number) return this.prs.get(String(r.number)) ?? null;
+    if (!r.branch) return null;
+    let best = null;
+    for (const v of this.prs.values()) if (v.pr.headRefName === r.branch && (!best || v.pr.number > best.pr.number)) best = v;
+    return best;
+  }
+
+  // One PR, by number or branch, into the cache. Returns { pr, at } or { error }.
+  async fetchOne(ref, cwd) {
+    const r = await sh("gh", ["pr", "view", String(ref), "--json", FIELDS], cwd);
+    if (!r.ok) return { pr: null, error: /no pull requests found/i.test(r.err) ? null : r.err.split("\n")[0] };
+    const entry = { pr: slim(JSON.parse(r.out)), at: Date.now() };
+    this.prs.set(String(entry.pr.number), entry);
+    return entry;
+  }
+
+  // Every open PR of mine in one call (about 6 s for 14 PRs), at most every 45 s, in the background.
+  refreshMine(cx, cwd) {
+    if (this.mineBusy || !cwd || Date.now() - this.mineAt < 45000) return;
+    this.mineBusy = true;
+    this.fetching++;
+    cx.spawn(async (cx) => {
+      const r = await sh("gh", ["pr", "list", "--author", "@me", "--state", "open", "--limit", "100", "--json", FIELDS], cwd);
+      if (r.ok) {
+        const now = Date.now();
+        const list = JSON.parse(r.out).map(slim);
+        for (const pr of list) this.prs.set(String(pr.number), { pr, at: now });
+        this.mine = list.map((pr) => String(pr.number));
+        this.mineAt = now;
+        savePrCache(this.prs);
+        for (const row of this.view?.rows ?? []) { const c = this.cached(row); if (c) row.gh = c; }
+      }
+      this.mineBusy = false;
+      this.fetching--;
+      cx.notify();
+    });
+  }
+
+  // withGitHub: false re-reads only state.md and keeps the cached GitHub data.
   reload(cx, withGitHub) {
+    const seq = ++this.seq;
     cx.spawn(async (cx) => {
       const { space, cwds, focusedCwd } = spaceFolders();
-      this.space = space;
+      // Switching spaces: show what this space looked like last time, right away.
+      if (space !== this.space) {
+        this.space = space;
+        this.view = this.spaceViews.get(space) ?? this.view;
+        cx.notify();
+      }
       this.cwd = focusedCwd;
       const runs = await listRuns();
       // Match runs by task worktrees only ("<repo>-worktrees/<name>"): the main checkout's
@@ -190,37 +251,40 @@ export default class JobPanel extends View {
       }
       const us = run ? units(run.text ?? (await read(run))) : [];
 
-      // Branches open in this space's tabs (any one cwd per worktree is enough).
+      // Branches open in this space's tabs, all at once (any one cwd per worktree is enough).
+      const branchOf = await Promise.all([...cwds, focusedCwd].map(async (c) => (c ? (await sh("git", ["branch", "--show-current"], c)).out : "")));
       const tabBranches = new Map(); // branch -> a cwd on it
-      for (const c of cwds) {
-        const b = (await sh("git", ["branch", "--show-current"], c)).out;
-        if (b && !tabBranches.has(b)) tabBranches.set(b, c);
-      }
-      const focusedBranch = focusedCwd ? (await sh("git", ["branch", "--show-current"], focusedCwd)).out : "";
+      cwds.forEach((c, i) => { if (branchOf[i] && !tabBranches.has(branchOf[i])) tabBranches.set(branchOf[i], c); });
+      const focusedBranch = branchOf[branchOf.length - 1];
       const repoCwd = focusedCwd ?? cwds[0] ?? null;
+      if (seq !== this.seq) return; // a newer reload started
 
-      // One row per unit, then tabs whose branch no unit names.
-      const rows = us.map((u) => ({
-        key: `u:${u.unit}`, unit: u, branch: (u.branch ?? "").split(/\s/)[0], number: prNumber(u.pr),
-      }));
-      for (const [b] of tabBranches) {
-        if (!rows.some((r) => r.branch === b)) rows.push({ key: `b:${b}`, unit: null, branch: b, number: null });
-      }
-
-      const old = new Map((this.view?.rows ?? []).map((r) => [r.key, r]));
-      for (const r of rows) {
-        if (!withGitHub && old.has(r.key)) { r.gh = old.get(r.key).gh; continue; }
-        if (!repoCwd || (!r.number && !r.branch)) { r.gh = { pr: null, error: null }; continue; }
-        r.gh = await prView(r.number ?? r.branch, tabBranches.get(r.branch) ?? repoCwd);
-      }
-      // Tab rows with no PR are noise (e.g. the orchestrator's own branch).
-      const shown = rows.filter((r) => r.unit || r.gh?.pr);
-      for (const r of shown) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
-
+      // One row per unit, then tabs whose branch no unit names. Cached PR data first.
+      const rows = us.map((u) => ({ key: `u:${u.unit}`, unit: u, branch: (u.branch ?? "").split(/\s/)[0], number: prNumber(u.pr) }));
+      for (const [b] of tabBranches) if (!rows.some((r) => r.branch === b)) rows.push({ key: `b:${b}`, unit: null, branch: b, number: null });
+      for (const r of rows) r.gh = this.cached(r);
+      for (const r of rows) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
+      const view = { run, rows, focusedBranch };
       this.runs = runs;
-      if (withGitHub && repoCwd) this.checkFinished(cx, runs.slice(0, 12), repoCwd);
-      this.view = { run, rows: shown, focusedBranch, at: new Date() };
+      this.view = view;
+      this.spaceViews.set(space, view);
       cx.notify();
+
+      if (!withGitHub || !repoCwd) return;
+      this.refreshMine(cx, repoCwd);
+      if (repoCwd) this.checkFinished(cx, runs.slice(0, 12), repoCwd);
+      // Fresh data for each row in parallel; each row updates as its answer lands.
+      // Merged/closed PRs are final, so their cached copy is enough.
+      await Promise.all(rows.map(async (r) => {
+        if (!r.number && !r.branch) return;
+        if (done(r.gh?.pr)) return;
+        this.fetching++;
+        cx.notify();
+        r.gh = await this.fetchOne(r.number ?? r.branch, tabBranches.get(r.branch) ?? repoCwd);
+        this.fetching--;
+        cx.notify();
+      }));
+      savePrCache(this.prs);
     });
   }
 
@@ -258,7 +322,7 @@ export default class JobPanel extends View {
     const vsha = sha(r.unit?.["verified tip"]);
     const tip = sha(r.unit?.["tip"]);
     // A merged or closed PR is history: its old checks and SHAs need no action.
-    if (pr && pr.state !== "OPEN") return r.unit ? [] : [["not in state.md", "warn"]];
+    if (pr && pr.state !== "OPEN") return r.unit || this.mode === "mine" ? [] : [["not in state.md", "warn"]];
     if (pr) {
       if (pr.state === "OPEN" && (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY")) out.push(["conflicts with base: no PR workflows run", "bad"]);
       const fails = pr.checks.filter((c) => c.result === "fail");
@@ -269,7 +333,7 @@ export default class JobPanel extends View {
     } else if (r.unit && r.number) {
       out.push([r.gh?.error ? `gh: ${r.gh.error}` : `PR #${r.number} not found`, "warn"]);
     }
-    if (!r.unit) out.push(["not in state.md", "warn"]);
+    if (!r.unit && this.mode !== "mine") out.push(["not in state.md", "warn"]);
     return out;
   }
 
@@ -296,6 +360,13 @@ export default class JobPanel extends View {
         .on_click((_e, cx) => { this.showFinished = !this.showFinished; cx.notify(); })
         .child(this.showFinished ? "hide finished" : `+${hidden.length} finished`));
     }
+    // All my open PRs (from the background batch call), off by default.
+    chips.push(div().id("run-mine").px(6).py(2).rounded(5).text_size(11)
+      .bg(this.mode === "mine" ? t.selected : t.raised)
+      .text_color(this.mode === "mine" ? t.foreground : t.muted)
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { this.mode = this.mode === "mine" ? "job" : "mine"; cx.notify(); })
+      .child(`my open PRs${this.mine ? ` (${this.mine.length})` : ""}`));
 
     const mark = { fail: ["✕", t.blocked], pending: ["●", t.working], pass: ["✓", t.done], skip: ["–", t.dim] };
     const row = (r, i) => {
@@ -315,7 +386,7 @@ export default class JobPanel extends View {
         .on_click((_e, cx) => { this.open.has(r.key) ? this.open.delete(r.key) : this.open.add(r.key); cx.notify(); })
         // Name and PR number
         .child(h_flex().gap(8).justify_between()
-          .child(div().truncate().font_semibold().text_color(t.foreground).child(r.unit?.unit || r.branch))
+          .child(div().truncate().font_semibold().text_color(t.foreground).child(r.unit?.unit || pr?.title || r.branch))
           .when(Boolean(pr), (el) => el.child(
             div().id(`pr-${i}`).text_color(t.accent).hover((s) => s.text_color(t.foreground))
               .on_click((_e, cx) => { exec("open", [pr.url]); cx.stop_propagation(); })
@@ -351,16 +422,27 @@ export default class JobPanel extends View {
         });
     };
 
+    // Rows: the job's units and tabs with a PR, or every open PR of mine.
+    const rows = this.mode === "mine"
+      ? (this.mine ?? []).map((n) => ({ key: `p:${n}`, unit: null, number: n, gh: this.prs.get(n), branch: this.prs.get(n)?.pr.headRefName }))
+      : v.rows.filter((r) => r.unit || r.gh?.pr);
+    const ats = rows.map((r) => r.gh?.at).filter(Boolean);
+    const fresh = ats.length ? `GitHub ${ago(Math.min(...ats) / 1000)}` : "GitHub not loaded yet";
+    const busy = this.fetching > 0 ? " · updating…" : "";
+
     return root.child(head)
       .child(div().text_size(11).text_color(t.dim).child(
-        this.pinned ? "RECENT RUNS · showing the one you picked (click it again to unpick)"
+        this.mode === "mine" ? "MY OPEN PRS · click the chip again to go back to the job"
+        : this.pinned ? "RECENT RUNS · showing the one you picked (click it again to unpick)"
         : v.run ? "RECENT RUNS · showing the run for this space (click another to view it)"
         : "RECENT RUNS · none matches this space (click one to view it)"))
       .child(h_flex().gap(4).flex_wrap().children(chips))
       .child(div().text_size(11).text_color(t.dim).child(
-        v.run ? `${v.run.name} · state.md ${ago(v.run.mtime)} · GitHub ${v.at.toLocaleTimeString()}`
-              : `No orchestrate run for this space · GitHub ${v.at.toLocaleTimeString()}`))
-      .when(v.rows.length === 0, (el) => el.child(div().text_color(t.muted).child("No PRs for the branches open here.")))
-      .child(v_flex().id("rows").flex_1().min_h(0).overflow_y_scrollbar().gap(6).children(v.rows.map(row)));
+        this.mode === "mine" ? `${rows.length} open · ${fresh}${busy}`
+        : v.run ? `${v.run.name} · state.md ${ago(v.run.mtime)} · ${fresh}${busy}`
+        : `No orchestrate run for this space · ${fresh}${busy}`))
+      .when(rows.length === 0, (el) => el.child(div().text_color(t.muted).child(
+        this.mode === "mine" ? (this.mine ? "No open PRs." : "Loading your PRs…") : "No PRs for the branches open here.")))
+      .child(v_flex().id("rows").flex_1().min_h(0).overflow_y_scrollbar().gap(6).children(rows.map(row)));
   }
 }
