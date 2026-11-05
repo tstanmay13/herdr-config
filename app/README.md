@@ -41,9 +41,12 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   this repo. Click a Pokémon to go to its agent; right-click or `alt-shift-p` picks another.
   Ours (`workflow.js`): agents are matched to orchestrate runs by their session name (the
   terminal title, `claude -n <run>-<suffix>`), else by worktree; the first tab's agent is the
-  run's lead. Levels: lead 5 + 2 per merged unit in the run, implementer 5 + 3 per merged unit
-  it owns, verifier 5 + 1 per two reviews. New agents hatch as first forms and evolve at Lv 16
-  and 32. A unit ready to merge puts a `PR #N` pill over its owner and the lead (click opens
+  run's lead. XP goes into a box (`box.js`, shared state `pokemon-agents.box`) on the Pokémon
+  line, not the session, because implementers are one-off: 3 per merged unit an implementer
+  owns (paid even after its session exits, from the session name state.md records), 2 per
+  merged unit to the run's lead, 1 per two reviews to a verifier. Level = 5 + XP; lines evolve
+  at Lv 16 and 32. A new agent is handed a line from the box that is not on screen, so it can
+  arrive already evolved; a fresh first form only when every boxed line is out. A unit ready to merge puts a `PR #N` pill over its owner and the lead (click opens
   it); a ready PR is checked on GitHub, so a merge shows at once: the owner hops and eats.
   `!` when the unit, or the lead's run, needs you; a run that just closed dances.
 - `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`

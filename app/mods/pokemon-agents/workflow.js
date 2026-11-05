@@ -217,6 +217,9 @@ export function mapAgents(list, cwdOf, runs, now = Date.now()) {
     out[a.address] = {
       run: run.name, role, label, level, merged: role === "verifier" ? run.verifications : merged, ready, needs,
       party: run.closed && now - run.mtime < PARTY_MS, summary, cwd: cwdOf(a),
+      // The session name the box remembers it by: a worker's or verifier's own name, or the
+      // lead's title. Generic titles ("Claude Code") are not names.
+      session: (p.by === "title" || role === "lead") && a.title && !/^claude code$/i.test(a.title.trim()) ? a.title.trim() : null,
     };
   }
   return out;
@@ -240,6 +243,11 @@ export const EVOLVE_AT = [16, 32];
 
 // The form a pick reaches at a level. Never goes back below the pick itself; Eevee's branch
 // is chosen by seed so it stays the same for one agent.
+// The line a Pokémon belongs to: its first form (Eevee's branches all belong to 133).
+export function lineOf(id) {
+  return CHAINS.find((c) => c.includes(id))?.[0] ?? id;
+}
+
 export function evolve(pick, level, seed) {
   const all = CHAINS.filter((c) => c.includes(pick));
   if (!all.length) return pick;

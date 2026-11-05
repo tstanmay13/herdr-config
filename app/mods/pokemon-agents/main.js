@@ -3,15 +3,17 @@
 // Click one to go to its agent; right-click to choose which of the first 151 it is.
 //
 // Fork of github.com/mathieucroset/herdr-pokemon-agents@0fc10dc (MIT). Ours: the orchestrate
-// layer (workflow.js). Agents in an orchestrate run level up from merges and evolve at Lv 16
-// and 32; a PR waiting in Ready shows as a "PR #N" pill (click to open it); a merge makes the
+// layer (workflow.js) and the box (box.js). XP from merges and reviews is banked on the
+// Pokémon line, not the session, so one-off implementers still grow the box; lines evolve
+// at Lv 16 and 32; a PR waiting in Ready shows as a "PR #N" pill (click to open it); a merge makes the
 // owner hop and eat; "!" when the unit or the lead's run needs you; a closed run dances.
 import { View, div, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { agents as allAgents, focused, spaces, panes, exec, watchFolder, home, theme, settings, run, props, shared, setShared, openOverlay, closeOverlay, nextCommand } from "herdr";
 import { NAMES, COUNT, nameOf, dexNo } from "./names.js";
 import { loadSprite, ensureIcons, iconPath, imageMagick } from "./sprites.js";
-import { loadRuns, mapAgents, evolve, BASES } from "./workflow.js";
+import { loadRuns, mapAgents, evolve, lineOf, BASES } from "./workflow.js";
+import { loadBox, levelOf, settle, saveBox } from "./box.js";
 
 const KEY = "pokemon-agents"; // shared state: { panes: { <pane id>: <dex number> } }
 const SLOT = 128; // width of one Pokémon's column (sprite + name tag)
@@ -52,7 +54,9 @@ function hash(s) {
 }
 
 // Saved picks first; a new agent gets a Pokémon nobody on screen has yet (stable per pane).
-function assign(list) {
+// Ours: it comes from the box first (lines that have earned XP), so a one-off session can
+// arrive already evolved; a fresh first form only when every boxed line is on screen.
+function assign(list, box = loadBox()) {
   const saved = savedPicks();
   const ids = {};
   const fresh = {};
@@ -63,10 +67,14 @@ function assign(list) {
   }
   for (const a of list) {
     if (ids[a.address]) continue;
-    // First forms only: they evolve as their work merges (workflow.js).
-    let k = hash(slotOf(a)) % BASES.length;
-    for (let i = 0; i < BASES.length && used.has(BASES[k]); i++) k = (k + 1) % BASES.length;
-    const id = BASES[k];
+    const boxed = Object.keys(box.xp).map(Number).filter((l) => box.xp[l] > 0 && !used.has(l)).sort((x, y) => x - y);
+    let id;
+    if (boxed.length) id = boxed[hash(slotOf(a)) % boxed.length];
+    else {
+      let k = hash(slotOf(a)) % BASES.length;
+      for (let i = 0; i < BASES.length && used.has(BASES[k]); i++) k = (k + 1) % BASES.length;
+      id = BASES[k];
+    }
     ids[a.address] = id;
     if (a.pane) fresh[a.pane] = id; // only remember agents that have a pane (sub-agents don't)
     used.add(id);
@@ -175,10 +183,24 @@ export default class PokemonAgents extends View {
     const now = Date.now();
     const list = agents();
     const tabs = tabsById();
-    const { ids: picks, fresh } = assign(list);
+    // Every agent in the window earns for the box; the strip shows only the focused space.
+    const everyone = allAgents();
+    const box = loadBox();
+    const { ids: picks, fresh } = assign(everyone, box);
     if (Object.keys(fresh).length) savePicks(fresh); // keeps new agents' Pokémon stable
     const cwds = Object.fromEntries(panes().map((p) => [p.pane, p.cwd]));
-    this.work = mapAgents(list, (a) => cwds[a.pane], this.runs, now);
+    this.work = mapAgents(everyone, (a) => cwds[a.pane], this.runs, now);
+    // Pay the box for merges and reviews, then read each agent's level from its line.
+    const seen = everyone.filter((a) => this.work[a.address]?.session)
+      .map((a) => ({ session: this.work[a.address].session, line: lineOf(picks[a.address]), role: this.work[a.address].role, run: this.work[a.address].run }));
+    if (this.runs.length && settle(box, seen, this.runs)) saveBox(box);
+    for (const a of everyone) {
+      const w = this.work[a.address];
+      if (!w) continue;
+      const line = lineOf(picks[a.address]);
+      w.level = levelOf(box, line);
+      w.xp = Math.floor(box.xp[line] ?? 0);
+    }
     const ids = this.shown(list, picks, now);
     if (this.magick) for (const id of new Set(Object.values(ids))) this.want(id, cx);
 
@@ -332,7 +354,7 @@ export default class PokemonAgents extends View {
     const tagText = (a) => {
       const w = this.work[a.address];
       const base = w ? `${w.label} · Lv${w.level}` : tagOf(a, tabs);
-      return this.hover === a.address ? `${nameOf(ids[a.address])} · ${w ? `${w.summary}` : base}` : base;
+      return this.hover === a.address ? `${nameOf(ids[a.address])} · ${w ? `${w.summary} · ${w.xp} XP banked` : base}` : base;
     };
     const placed = [];
     const showTag = new Set();
