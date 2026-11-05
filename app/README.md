@@ -34,17 +34,21 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   uncommitted changes and open tabs. Merged-and-clean ones start selected; ones with
   uncommitted changes cannot be selected. Removing closes the tabs inside, runs
   `git worktree remove` (never `--force`), and deletes the branch only if its PR merged.
-- `job-panel`: a status board for orchestrate runs, one line per unit with one word:
-  `needs-you`, `ready`, `ready?`, `working`, `waiting`, `paused`, `merged`. The orchestrator
-  writes the word at the start of the unit's `status` cell in `state.md` (orchestrate's
-  `tanmay/status-words` branch); older runs get a guess from the text. GitHub decides merged,
-  and `ready` shows only when GitHub agrees: the head is the verified SHA, every check passed,
-  no conflicts. Otherwise the row says `ready?` and why (head moved, 2 checks red, CI running).
-  The top section, "Needs you", lists every needs-you and ready unit across all unfinished runs,
-  plus any run's `**Needs you:**` line; click one to jump to its run. Below it is the focused
-  space's run (chips pick another; "my open PRs" lists every open PR of mine), with merged and
-  closed units folded at the bottom. Click a row for the orchestrator's note and the names of
-  red checks; click the PR number to open it.
+- `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`
+  (orchestrate's `## Units` and `## Workers` tables; older single-table runs drop their stack
+  summary rows and move session rows to workers). One row per PR: unit tag, PR title, a CI mark
+  (`✗2` red checks, `●` running, `✓` green, `conflict`), `on #N` when the PR is stacked on
+  another open PR, and the PR number. Click a row to open the PR, `on #N` to open the base,
+  and the chevron for the orchestrator's note, owners, branch and red checks. Rows are grouped:
+  needs you, ready, then by the unit's `stage` (merge, fix, verify, ai-review, self-check,
+  build; older runs: guessed from the note), then waiting; merged units fold at the bottom
+  with a count of those still needing a real run. `ready` shows only when GitHub agrees: the
+  head is the verified SHA, every check passed, no conflicts; otherwise the group says why.
+  Stacked PRs sit indented under their base, which covers gh-stack stacks and hand-made
+  ones, because both are PRs based on another PR's branch. The run's `**Needs you:**` line
+  and any worker waiting on you sit above the groups. "Other runs" lists one line per
+  unfinished run where something needs you or is ready; click it to switch. Chips pick
+  another run; "my open PRs" lists every open PR of mine with stacks indented.
   Finished runs are hidden ("+N finished" shows them): `**Closed:**` in `state.md`, every
   unit's PR merged or closed, or every PR merged or closed and `state.md` quiet for 3 days.
   Speed: PR data is cached across restarts and each space's last view is kept, so switching

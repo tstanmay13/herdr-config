@@ -1,20 +1,18 @@
-// Job panel: a status board for orchestrate runs. One line per unit with one status word:
-// needs-you, ready, ready?, working, waiting, paused, merged. The orchestrator writes the word at
-// the start of the unit's state.md status cell (older runs: guessed from the text); GitHub
-// decides merged, and "ready" shows only when GitHub agrees (head is the verified SHA, CI green,
-// no conflicts), else "ready?" with the reason.
-//
-// Top: "Needs you", every needs-you and ready unit across all unfinished runs (from cached PR
-// data, no extra GitHub calls), plus each run's "**Needs you:**" line. Below: the focused
-// space's run (or a picked chip), merged units folded at the bottom. Click a row for the
-// orchestrator's note and the red checks' names; click the PR number to open it.
+// Job panel: a board of the orchestrate run in the focused space, read from its state.md.
+// One row per PR: unit tag, PR title, CI mark, the base PR when stacked, the PR number. Click a
+// row to open the PR; the chevron shows the orchestrator's note, owners and red checks.
+// Rows are grouped by where the unit is: needs you, ready, then the `stage` column (merge, fix,
+// verify, ai-review, self-check, build; older runs: guessed from the note), then waiting.
+// "ready" shows only when GitHub agrees (head is the verified SHA, CI green, no conflicts),
+// else the row says why. Stacks (gh-stack or hand-made) come from each PR's base branch.
+// Below: one line per other run that has something for you. "my open PRs" lists all of mine.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { theme, focused, spaces, panes, exec, home, readTextFile, watchFolder } from "herdr";
 
 const ROOTS = () => [`${home()}/.config/agent-orchestrate/runs`, `${home()}/.claude/orchestrate/runs`];
-const FIELDS = "number,title,state,isDraft,url,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,headRefName";
+const FIELDS = "number,title,state,isDraft,url,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,headRefName,baseRefName";
 
 async function sh(cmd, args, cwd) {
   try {
@@ -40,22 +38,94 @@ async function listRuns() {
   return runs.sort((a, b) => b.mtime - a.mtime);
 }
 
-// The first markdown table whose header has a "unit" column: [{ column: value }].
-function units(md) {
+// state.md's tables: "## Units" (one row per PR) and "## Workers" (one row per session).
+// Older runs keep everything in one unit table, with stack summary rows ("R1-R5 runs stack")
+// and session rows ("verifier-2") mixed in: summaries are dropped, sessions become workers.
+function tables(md) {
   const lines = md.split("\n");
   const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const units = [], workers = [];
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim().startsWith("|")) continue;
     const header = cells(lines[i]).map((h) => h.toLowerCase());
-    if (!header.includes("unit")) continue;
     const rows = [];
-    for (let j = i + 2; j < lines.length && lines[j].trim().startsWith("|"); j++) {
+    let j = i + 2;
+    for (; j < lines.length && lines[j].trim().startsWith("|"); j++) {
       const c = cells(lines[j]);
       rows.push(Object.fromEntries(header.map((h, k) => [h, c[k] ?? ""])));
     }
-    return rows;
+    if (header.includes("worker")) workers.push(...rows.map((r) => ({ name: r.worker, role: r.role ?? "", status: r.status ?? "" })));
+    else if (header.includes("unit")) units.push(...rows);
+    i = j - 1;
   }
-  return [];
+  const kept = [];
+  for (const u of units) {
+    const name = u.unit ?? "";
+    if (prNumber(u.pr)) { kept.push(u); continue; }
+    if (/\bstack\b/i.test(name) || /\b[A-Z]+\d+\s*-\s*[A-Z]*\d+\b/.test(name)) continue;
+    const w = orchWord(u.status).word;
+    if (w !== "merged" && w !== "dropped" && (/^verifier\b/i.test(name) || /^detached\b/i.test(u.branch ?? ""))) {
+      workers.push({ name, role: /verifier/i.test(name) ? "verifier" : "worker", status: u.status ?? "" });
+      continue;
+    }
+    kept.push(u);
+  }
+  return { units: kept, workers };
+}
+
+// The run-wide "**Needs you:**" line, unless it says nothing is open.
+function runAsk(md) {
+  const m = /^\*\*Needs you:\*\*\s*(.+)$/m.exec(md);
+  const text = m?.[1].trim();
+  return text && !/^(nothing|none|no\b|n\/a|-)/i.test(text) ? text : null;
+}
+
+// Where a unit is in the gates: the stage column, or (older runs) the first stage the note names.
+const STAGES = ["build", "self-check", "ai-review", "verify", "fix", "merge", "real-run", "done"];
+function stageOf(u) {
+  const s = String(u.stage ?? "").trim().toLowerCase().split(/\s/)[0];
+  if (STAGES.includes(s)) return s;
+  const note = String(u.status ?? "").toLowerCase();
+  const hits = [
+    ["self-check", /self-check/], ["ai-review", /ai-review|review round/], ["verify", /verif|recheck/],
+    ["fix", /\bfix|rework|\bf\d+\b|\bred\b|finding/], ["build", /build|implement|prompted|dispatch/],
+  ].map(([st, re]) => { const m = re.exec(note); return m ? [st, m.index] : null; }).filter(Boolean);
+  return hits.sort((a, b) => a[1] - b[1])[0]?.[0] ?? null;
+}
+
+const isBranch = (b) => /^[\w.\/-]+$/.test(b) && !/^(detached|none|-+|n\/a)$/i.test(b);
+function unitRow(u) {
+  const b = (u.branch ?? "").split(/[\s,]/)[0];
+  return { key: `u:${u.unit}`, unit: u, branch: isBranch(b) ? b : "", number: prNumber(u.pr), stage: stageOf(u) };
+}
+
+// "A2 access-write" -> { tag: "A2", name: "access-write" }.
+function unitLabel(unit) {
+  const m = /^([A-Z0-9][A-Za-z0-9-]{0,5})\s+(.+)$/.exec(unit ?? "");
+  return m && /[A-Z0-9]/.test(m[1][0]) ? { tag: m[1], name: m[2] } : { tag: "", name: unit ?? "" };
+}
+
+// Children after their base PR, indented: covers gh-stack stacks and hand-made ones alike,
+// since both are PRs whose base branch is another PR's head. Keeps the input's root order.
+function stackOrder(items) {
+  const byHead = new Map();
+  for (const x of items) { const h = x.r.gh?.pr?.headRefName; if (h) byHead.set(h, x); }
+  const kids = new Map(), roots = [];
+  for (const x of items) {
+    const parent = byHead.get(x.r.gh?.pr?.baseRefName ?? "");
+    if (parent && parent !== x) { if (!kids.has(parent)) kids.set(parent, []); kids.get(parent).push(x); }
+    else roots.push(x);
+  }
+  const out = [], seen = new Set();
+  const walk = (x, depth) => {
+    if (seen.has(x)) return;
+    seen.add(x);
+    out.push({ ...x, depth });
+    for (const k of kids.get(x) ?? []) walk(k, depth + 1);
+  };
+  roots.forEach((x) => walk(x, 0));
+  items.forEach((x) => walk(x, 0)); // anything left in a cycle
+  return out;
 }
 
 const sha = (s) => (String(s ?? "").match(/\b[0-9a-f]{7,40}\b/) ?? [""])[0];
@@ -106,7 +176,7 @@ function saveStates(m) {
 }
 async function runFinished(text, cwd, states) {
   if (/^\*\*Closed:\*\*/m.test(text)) return true;
-  const us = units(text);
+  const us = tables(text).units;
   if (!us.length || !cwd) return null;
   let missing = false;
   for (const u of us) {
@@ -194,8 +264,7 @@ export default class JobPanel extends View {
     this.open = new Set();
     this.finished = new Map(); // run name -> true | false | null
     this.states = loadStates(); // PR number -> MERGED | CLOSED (final states only)
-    this.inbox = []; // [{ run, unit row }] across unfinished runs
-    this.runAsks = []; // [{ run, text }] from **Needs you:** lines
+    this.others = []; // [{ run, rows, asks }]: other unfinished runs with something for you
     this.showDone = false;
     this.showFinished = false;
     this.reload(cx, true);
@@ -290,22 +359,21 @@ export default class JobPanel extends View {
           if (keys.some((k) => r.text.includes(k))) { run = r; break; }
         }
       }
-      const us = run ? units(run.text ?? (await read(run))) : [];
+      const tb = run ? tables(run.text ?? (await read(run))) : { units: [], workers: [] };
+      const ask = run ? runAsk(run.text ?? "") : null;
 
-      // Needs-you and ready units across unfinished runs (state.md only; PR data from the cache).
-      const inbox = [], asks = [];
+      // Other unfinished runs: what needs you there (state.md only; PR data from the cache).
+      const others = [];
       for (const r of runs.slice(0, 12)) {
-        if (this.finished.get(r.name) === true) continue;
+        if (this.finished.get(r.name) === true || r.name === run?.name) continue;
         r.text = r.text ?? (await read(r));
-        const ask = /^\*\*Needs you:\*\*\s*(.+)$/m.exec(r.text);
-        if (ask) asks.push({ run: r, text: ask[1].trim() });
-        for (const u of units(r.text)) {
-          const w = orchWord(u.status).word;
-          if (w === "needs-you" || w === "ready") inbox.push({ run: r, row: { key: `u:${u.unit}`, unit: u, branch: (u.branch ?? "").split(/\s/)[0], number: prNumber(u.pr) } });
-        }
+        const t = tables(r.text);
+        const rows = t.units.filter((u) => ["needs-you", "ready"].includes(orchWord(u.status).word)).map(unitRow);
+        const asks = [runAsk(r.text), ...t.workers.filter((w) => orchWord(w.status).word === "needs-you")
+          .map((w) => `${w.name}: ${orchWord(w.status).rest}`)].filter(Boolean);
+        if (rows.length || asks.length) others.push({ run: r, rows, asks });
       }
-      this.inbox = inbox;
-      this.runAsks = asks;
+      this.others = others;
 
       // Branches open in this space's tabs, all at once (any one cwd per worktree is enough).
       const branchOf = await Promise.all([...cwds, focusedCwd].map(async (c) => (c ? (await sh("git", ["branch", "--show-current"], c)).out : "")));
@@ -316,11 +384,11 @@ export default class JobPanel extends View {
       if (seq !== this.seq) return; // a newer reload started
 
       // One row per unit, then tabs whose branch no unit names. Cached PR data first.
-      const rows = us.map((u) => ({ key: `u:${u.unit}`, unit: u, branch: (u.branch ?? "").split(/\s/)[0], number: prNumber(u.pr) }));
+      const rows = tb.units.map(unitRow);
       for (const [b] of tabBranches) if (!rows.some((r) => r.branch === b)) rows.push({ key: `b:${b}`, unit: null, branch: b, number: null });
       for (const r of rows) r.gh = this.cached(r);
       for (const r of rows) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
-      const view = { run, rows, focusedBranch };
+      const view = { run, rows, focusedBranch, workers: tb.workers, ask };
       this.runs = runs;
       this.view = view;
       this.spaceViews.set(space, view);
@@ -372,7 +440,8 @@ export default class JobPanel extends View {
   }
 
   // A row's status: { word, note, color }. Merged/closed from GitHub win; "ready" only when
-  // GitHub agrees; rows with no unit get their word from GitHub alone.
+  // GitHub agrees; rows with no unit get their word from GitHub alone. The note is the
+  // orchestrator's (for ready?, the reason GitHub disagrees).
   status(r, t) {
     const pr = r.gh?.pr;
     const C = { "needs-you": t.blocked, ready: t.done, "ready?": t.working, open: t.working, working: t.working, waiting: t.muted, paused: t.muted, dropped: t.dim, closed: t.dim, merged: t.dim };
@@ -389,9 +458,17 @@ export default class JobPanel extends View {
       if (v && !sameSha(v, pr.headRefOid)) return out("ready?", "head moved since verify");
       return gh.green ? out("ready", gh.approval) : out("ready?", gh.why);
     }
-    if (word === "needs-you") return out(word, short(rest, 70) || null);
-    if (word === "waiting" || word === "paused") return out(word, short(rest.replace(/^(waiting|paused)\s*/i, ""), 50) || null);
-    return out(word);
+    return out(word, rest.replace(/^(waiting|paused)\s*/i, "") || null);
+  }
+
+  // The board group a run row goes in.
+  group(r, st) {
+    if (RANK[st.word] >= 5) return "done";
+    if (st.word === "needs-you") return "needs you";
+    if (st.word === "ready" || st.word === "ready?") return "ready";
+    if (st.word === "waiting" || st.word === "paused") return "waiting";
+    if (!r.unit) return "other PRs in this space";
+    return r.stage && r.stage !== "done" && r.stage !== "real-run" ? r.stage : "working";
   }
 
   render() {
@@ -401,52 +478,63 @@ export default class JobPanel extends View {
     const label = (s) => div().text_size(11).text_color(t.dim).child(s);
     if (v === undefined) return root.child(label("JOB")).child(div().text_color(t.muted).child("Loading…"));
     const runName = (name) => short(name.replace(/^\d{4}-\d{2}-\d{2}-/, ""), 22);
+    const openUrl = (url) => (_e, cx) => { exec("open", [url]); cx.stop_propagation(); };
 
-    // One line: status word, name, PR number; a second line only for a short note.
-    // Expanded: the orchestrator's own note, who owns it, and the red checks by name.
-    const row = (r, id, prefix = null, onClick = null) => {
+    // Open PRs by head branch, to name a stacked PR's base.
+    const byHead = new Map();
+    for (const { pr } of this.prs.values()) if (pr.state === "OPEN") byHead.set(pr.headRefName, pr);
+
+    // CI at a glance: red count, running, conflicts, or green.
+    const ci = (pr) => {
+      if (!pr || pr.state !== "OPEN") return null;
+      const g = ghReady(pr);
+      if (g.why === "conflicts") return { text: "conflict", color: t.blocked };
+      if (g.fail.length) return { text: `✗${g.fail.length}`, color: t.blocked };
+      if (pr.checks.some((c) => c.result === "pending")) return { text: "●", color: t.working };
+      return { text: "✓", color: t.done };
+    };
+
+    // One PR per row: unit tag, PR title, CI, base PR if stacked, PR number. Clicking the row
+    // opens the PR; the chevron shows the orchestrator's note, owners and red checks.
+    const row = (r, id, { word = false, depth = 0 } = {}) => {
       const pr = r.gh?.pr;
       const st = this.status(r, t);
-      const isOpen = this.open.has(r.key) && !onClick;
-      const focusedRow = !prefix && Boolean(v.focusedBranch) && r.branch === v.focusedBranch;
-      const name = r.unit?.unit || pr?.title || r.branch || `#${r.number}`;
-      const who = r.unit ? [r.unit["implementer"] && `impl ${r.unit["implementer"].split(" ")[0]}`, r.unit["verifier"] && `verify ${r.unit["verifier"].split(" ")[0]}`].filter(Boolean).join(" · ") : r.branch;
-      const fails = pr && pr.state === "OPEN" ? pr.checks.filter((c) => c.result === "fail").map((c) => c.name) : [];
-      return v_flex().id(id).px(8).py(5).gap(2).rounded(6)
+      const isOpen = this.open.has(r.key);
+      const branch = r.branch || pr?.headRefName || "";
+      const focusedRow = Boolean(v.focusedBranch) && branch === v.focusedBranch;
+      const { tag, name } = unitLabel(r.unit?.unit);
+      const title = pr?.title || name || branch || `#${r.number}`;
+      const base = pr?.state === "OPEN" && depth === 0 ? byHead.get(pr.baseRefName) : null;
+      const mark = ci(pr);
+      const toggle = (cx) => { this.open.has(r.key) ? this.open.delete(r.key) : this.open.add(r.key); cx.notify(); };
+      const who = r.unit ? [r.unit["implementer"] && `impl ${r.unit["implementer"].split(" ")[0]}`, r.unit["verifier"] && `verify ${r.unit["verifier"].split(" ")[0]}`].filter(Boolean).join(" · ") : "";
+      const fails = mark ? pr.checks.filter((c) => c.result === "fail").map((c) => c.name) : [];
+      const dimmed = RANK[st.word] >= 5;
+      return v_flex().id(id).pl(8 + depth * 14).pr(6).py(5).gap(2).rounded(6)
         .bg(focusedRow ? t.selected : t.background)
         .hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => {
-          if (onClick) return onClick(cx);
-          this.open.has(r.key) ? this.open.delete(r.key) : this.open.add(r.key);
-          cx.notify();
-        })
-        .child(h_flex().gap(8)
-          .child(div().w(62).flex_none().text_size(11.5).font_semibold().text_color(st.color).child(st.word))
-          .child(div().flex_1().min_w(0).truncate().text_color(st.word === "merged" ? t.muted : t.foreground)
-            .child(prefix ? `${prefix} · ${name}` : name))
-          .when(Boolean(pr ?? r.number), (el) => el.child(
-            div().id(`${id}-pr`).flex_none().text_size(11.5).text_color(t.accent).hover((s) => s.text_color(t.foreground))
-              .on_click((_e, cx) => { if (pr) exec("open", [pr.url]); cx.stop_propagation(); })
-              .child(`#${pr?.number ?? r.number}`))))
-        .when(Boolean(st.note), (el) => el.child(div().pl(70).truncate().text_size(11).text_color(t.muted).child(st.note)))
-        .when(isOpen, (el) => el.child(v_flex().pl(70).gap(2).pt(2).text_size(11).text_color(t.muted)
+        .on_click((_e, cx) => (pr?.url ? exec("open", [pr.url]) : toggle(cx)))
+        .child(h_flex().gap(6)
+          .when(word, (el) => el.child(div().w(56).flex_none().text_size(11).font_semibold().text_color(st.color).child(st.word)))
+          .when(depth > 0, (el) => el.child(div().flex_none().text_color(t.dim).child("↳")))
+          .when(Boolean(tag), (el) => el.child(div().flex_none().px(4).rounded(4).bg(t.raised).text_size(10.5).text_color(t.muted).child(tag)))
+          .child(div().flex_1().min_w(0).truncate().text_color(dimmed ? t.muted : t.foreground).child(title))
+          .when(Boolean(mark), (el) => el.child(div().flex_none().text_size(11).text_color(mark.color).child(mark.text)))
+          .when(Boolean(base), (el) => el.child(div().id(`${id}-base`).flex_none().text_size(11).text_color(t.dim)
+            .hover((s) => s.text_color(t.foreground)).on_click(openUrl(base.url)).child(`on #${base.number}`)))
+          .when(Boolean(pr ?? r.number), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.accent).child(`#${pr?.number ?? r.number}`)))
+          .child(div().id(`${id}-more`).flex_none().w(14).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+            .on_click((_e, cx) => { toggle(cx); cx.stop_propagation(); }).child(isOpen ? "▾" : "▸")))
+        .when(Boolean(st.note) && !dimmed, (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(st.note)))
+        .when(isOpen, (el) => el.child(v_flex().gap(2).pt(2).text_size(11).text_color(t.muted)
+          .when(Boolean(r.unit?.unit) && Boolean(pr?.title), (el) => el.child(div().truncate().text_color(t.dim).child(r.unit.unit)))
           .when(Boolean(r.unit?.status), (el) => el.child(div().whitespace_normal().child(r.unit.status)))
           .when(Boolean(who), (el) => el.child(div().truncate().text_color(t.dim).child(who)))
+          .when(Boolean(branch), (el) => el.child(div().truncate().text_color(t.dim).child(branch)))
           .when(fails.length > 0, (el) => el.child(div().whitespace_normal().text_color(t.dim).child(`red: ${fails.join(", ")}`)))));
     };
 
-    // Needs you: across all unfinished runs, newest run first.
-    for (const x of this.inbox) x.row.gh = this.cached(x.row);
-    const inbox = this.inbox.filter((x) => ["needs-you", "ready", "ready?"].includes(this.status(x.row, t).word))
-      .sort((a, b) => RANK[this.status(a.row, t).word] - RANK[this.status(b.row, t).word]);
-    const pick = (name, key) => (cx) => { this.mode = "job"; this.pinned = name; this.open = new Set(key ? [key] : []); this.reload(cx, true); };
-    const inboxEls = [
-      ...this.runAsks.map((a, i) => h_flex().id(`ask-${i}`).px(8).py(5).gap(8).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => pick(a.run.name, null)(cx))
-        .child(div().w(62).flex_none().text_size(11.5).font_semibold().text_color(t.blocked).child("needs-you"))
-        .child(div().flex_1().min_w(0).whitespace_normal().text_color(t.foreground).child(`${runName(a.run.name)} · ${a.text}`))),
-      ...inbox.map((x, i) => row(x.row, `in-${i}`, runName(x.run.name), pick(x.run.name, x.row.key))),
-    ];
+    const pick = (name) => (cx) => { this.mode = "job"; this.pinned = name; this.open = new Set(); this.reload(cx, true); };
 
     // Run chips (finished runs hidden unless asked) and the "my open PRs" switch.
     const hidden = this.runs.filter((x) => this.finished.get(x.name) === true && x.name !== v.run?.name);
@@ -463,38 +551,90 @@ export default class JobPanel extends View {
     chips.push(chip("run-mine", this.mode === "mine", `my open PRs${this.mine ? ` (${this.mine.length})` : ""}`,
       (cx) => { this.mode = this.mode === "mine" ? "job" : "mine"; cx.notify(); }));
 
-    // The run's rows, by status; merged/closed/dropped folded at the bottom.
+    // The rows: one per unit; a tab's branch only if its PR is not already a unit's.
+    const unitPrs = new Set(v.rows.filter((r) => r.unit).map((r) => String(r.number ?? r.gh?.pr?.number ?? "")));
     const rows = (this.mode === "mine"
       ? (this.mine ?? []).map((n) => ({ key: `p:${n}`, unit: null, number: n, gh: this.prs.get(n), branch: this.prs.get(n)?.pr.headRefName }))
-      : v.rows.filter((r) => r.unit || r.gh?.pr))
-      .map((r) => ({ r, w: this.status(r, t).word }))
-      .sort((a, b) => RANK[a.w] - RANK[b.w]);
+      : v.rows.filter((r) => r.unit || (r.gh?.pr && !unitPrs.has(String(r.gh.pr.number)))))
+      .map((r) => ({ r, st: this.status(r, t) }))
+      .map((x) => ({ ...x, w: x.st.word, g: this.mode === "mine" ? null : this.group(x.r, x.st) }));
     const live = rows.filter((x) => RANK[x.w] < 5);
     const done = rows.filter((x) => RANK[x.w] >= 5);
-    const counts = live.reduce((m, x) => ((m[x.w] = (m[x.w] ?? 0) + 1), m), {});
-    const summary = Object.entries(counts).map(([w, n]) => `${n} ${w}`).join(" · ") || "nothing open";
+    const needN = live.filter((x) => x.w === "needs-you").length + v.workers.filter((w) => orchWord(w.status).word === "needs-you").length + (v.ask ? 1 : 0);
+    const readyN = live.filter((x) => x.w === "ready").length;
+    const summary = [needN && `${needN} need you`, readyN && `${readyN} ready`, `${live.length} open`].filter(Boolean).join(" · ");
 
-    const ats = rows.map((x) => x.r.gh?.at).filter(Boolean);
+    const ats = live.map((x) => x.r.gh?.at).filter(Boolean); // merged PRs are never refetched
     const fresh = ats.length ? `GitHub ${ago(Math.min(...ats) / 1000)}` : "GitHub not loaded yet";
     const busy = this.fetching > 0 ? " · updating…" : "";
 
+    // Body: in a run, groups by stage; in "my open PRs", every PR with stacks indented.
+    const GROUPS = ["needs you", "ready", "merge", "fix", "verify", "ai-review", "self-check", "build", "working", "waiting", "other PRs in this space"];
+    const GC = { "needs you": t.blocked, ready: t.done };
+    const body = [];
+    if (this.mode === "mine") {
+      stackOrder(live.sort((a, b) => RANK[a.w] - RANK[b.w])).forEach((x, i) => body.push(row(x.r, `row-${i}`, { word: true, depth: x.depth })));
+    } else {
+      // The run's own ask and the workers that need something, above the units.
+      if (v.ask) body.push(h_flex().id("run-ask").px(8).py(5).gap(6).rounded(6).bg(t.background)
+        .child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child("needs you"))
+        .child(div().flex_1().min_w(0).whitespace_normal().child(v.ask)));
+      const busyW = v.workers.filter((w) => orchWord(w.status).word === "working");
+      const otherW = v.workers.filter((w) => !["working", "merged", "dropped"].includes(orchWord(w.status).word));
+      for (const [i, w] of otherW.entries()) {
+        const { word: ww, rest } = orchWord(w.status);
+        body.push(h_flex().id(`worker-${i}`).px(8).gap(6).text_size(11)
+          .child(div().flex_none().font_semibold().text_color(ww === "needs-you" ? t.blocked : t.muted).child(ww))
+          .child(div().flex_none().text_color(t.foreground).child(w.name))
+          .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(rest)));
+      }
+      if (v.workers.length) body.push(div().px(8).text_size(11).text_color(t.dim)
+        .child(`${busyW.length} of ${v.workers.length} sessions working: ${busyW.map((w) => w.name).join(", ")}`).truncate());
+      let n = 0;
+      for (const g of GROUPS) {
+        const items = live.filter((x) => x.g === g);
+        if (!items.length) continue;
+        body.push(div().px(8).pt(6).text_size(10.5).font_semibold().text_color(GC[g] ?? t.dim).child(`${g.toUpperCase()} (${items.length})`));
+        for (const x of stackOrder(items)) body.push(row(x.r, `row-${n++}`, { depth: x.depth }));
+      }
+    }
+    if (rows.length === 0) body.push(div().px(8).text_color(t.muted).child(
+      this.mode === "mine" ? (this.mine ? "No open PRs." : "Loading your PRs…") : "No PRs for the branches open here."));
+    const realRun = done.filter((x) => x.r.stage === "real-run" || /real-run[^;|]*pending/i.test(x.r.unit?.status ?? "")).length;
+
+    // Other runs: one line each, only when something there needs you or is ready to merge.
+    const otherEls = this.mode === "mine" ? [] : this.others.map((o, i) => {
+      for (const r of o.rows) r.gh = this.cached(r);
+      const words = o.rows.map((r) => this.status(r, t).word);
+      const need = o.asks.length + words.filter((w) => w === "needs-you").length;
+      const ready = words.filter((w) => w === "ready").length;
+      if (!need && !ready) return null;
+      const first = o.asks[0] ?? orchWord(o.rows.find((r) => this.status(r, t).word === "needs-you")?.unit.status).rest ?? "";
+      return v_flex().id(`other-${i}`).px(8).py(4).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => pick(o.run.name)(cx))
+        .child(h_flex().gap(6)
+          .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(runName(o.run.name)))
+          .when(need > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.blocked).child(`${need} need you`)))
+          .when(ready > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.done).child(`${ready} ready`))))
+        .when(Boolean(first), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(first)));
+    }).filter(Boolean);
+
     return root
-      .child(label(`NEEDS YOU${inboxEls.length ? ` (${inboxEls.length})` : ""} · all running jobs`))
-      .child(v_flex().gap(3).children(inboxEls.length ? inboxEls : [div().px(8).text_size(11.5).text_color(t.muted).child("Nothing needs you right now.")]))
-      .child(div().h(1).bg(t.raised))
       .child(h_flex().gap(4).flex_wrap().children(chips))
       .child(label(
-        this.mode === "mine" ? `MY OPEN PRS · ${summary} · ${fresh}${busy}`
+        this.mode === "mine" ? `MY OPEN PRS · ${live.length} open · ${fresh}${busy}`
         : v.run ? `${runName(v.run.name).toUpperCase()} · ${summary} · ${fresh}${busy}`
         : `NO RUN FOR THIS SPACE · ${fresh}${busy}`))
       .child(v_flex().id("rows").flex_1().min_h(0).overflow_y_scrollbar().gap(3)
-        .when(rows.length === 0, (el) => el.child(div().px(8).text_color(t.muted).child(
-          this.mode === "mine" ? (this.mine ? "No open PRs." : "Loading your PRs…") : "No PRs for the branches open here.")))
-        .children(live.map((x, i) => row(x.r, `row-${i}`)))
+        .children(body)
         .when(done.length > 0, (el) => el
           .child(div().id("done-toggle").px(8).py(4).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
             .on_click((_e, cx) => { this.showDone = !this.showDone; cx.notify(); })
-            .child(`${this.showDone ? "▾" : "▸"} ${done.length} merged or closed`))
-          .when(this.showDone, (el) => el.children(done.map((x, i) => row(x.r, `done-${i}`))))));
+            .child(`${this.showDone ? "▾" : "▸"} ${done.length} merged or closed${realRun ? ` · ${realRun} need a real run` : ""}`))
+          .when(this.showDone, (el) => el.children(done.map((x, i) => row(x.r, `done-${i}`))))))
+      .when(otherEls.length > 0, (el) => el
+        .child(div().h(1).bg(t.raised))
+        .child(label("OTHER RUNS"))
+        .child(v_flex().gap(3).children(otherEls)));
   }
 }
