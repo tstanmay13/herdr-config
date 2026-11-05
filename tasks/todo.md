@@ -34,3 +34,13 @@ and the panel together, with heuristics for older runs.
   ai-review 2, working 2, waiting 2; stack rows gone; verifier-2/3 and V moved to workers.
 - Panel hot-reloaded; `herdr-app check` passed, `herdr-app status` errors: [].
 - Screenshot of tkt-1831-errors space showed the run ask, grouped rows and the Other runs footer.
+
+# Pokémon strip tied to orchestrate (2026-11-05)
+Fork of mathieucroset/herdr-pokemon-agents (MIT code; sprites downloaded at run time, never in
+this repo), placed as a strip under the terminals, plus a workflow layer (workflow.js).
+- [ ] vendor upstream mod files, credit and pin the commit
+- [ ] workflow.js: runs from state.md, agent -> run/units by worktree, role lead/worker/verifier
+- [ ] levels (merges / run merges / verifications), evolution at Lv 16 and 32, base forms for new agents
+- [ ] moods: hungry PR pill (click opens PR), eating on merge, "!" on needs-you, dance on close
+- [ ] strip in tanmay layout under the terminals; install-mods.sh copies it
+- [ ] verify: herdr-app check, screenshot, node test of the workflow mapping
