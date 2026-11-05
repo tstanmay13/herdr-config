@@ -7,7 +7,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 app="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 mkdir -p "$app/mods" "$app/layouts"
 
-for m in task-worktree worktree-prune job-panel; do
+for m in task-worktree worktree-prune job-panel pokemon-agents; do
   mkdir -p "$app/mods/$m"
   cp "$here/mods/$m/"* "$app/mods/$m/"
 done
@@ -20,7 +20,7 @@ cp "$here/layouts/tanmay.json" "$app/layouts/tanmay.json"
 keys='{"global": {
   "cmd-n": "mod.open:task-worktree", "cmd-shift-n": "space.new",
   "cmd-shift-t": "mod.open:task-worktree-tab", "cmd-alt-k": "mod.open:worktree-prune",
-  "cmd-alt-o": "layout.toggle:ops"}}'
+  "cmd-alt-o": "layout.toggle:ops", "alt-shift-p": "pokemon-agents.pick"}}'
 if [ -f "$app/keys.json" ]; then
   jq --argjson k "$keys" '. * $k' "$app/keys.json" > "$app/keys.json.tmp" && mv "$app/keys.json.tmp" "$app/keys.json"
 else

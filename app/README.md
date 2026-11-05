@@ -34,6 +34,18 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   uncommitted changes and open tabs. Merged-and-clean ones start selected; ones with
   uncommitted changes cannot be selected. Removing closes the tabs inside, runs
   `git worktree remove` (never `--force`), and deletes the branch only if its PR merged.
+- `pokemon-agents`: a strip under the terminals where each agent in the focused space is a
+  Pokémon. Forked from [mathieucroset/herdr-pokemon-agents](https://github.com/mathieucroset/herdr-pokemon-agents)
+  (MIT); on first use it downloads PMD SpriteCollab sprites (CC BY-NC) into
+  `~/.config/herdr-app/data/pokemon-agents/` and cuts them with ImageMagick, so no art is in
+  this repo. Click a Pokémon to go to its agent; right-click or `alt-shift-p` picks another.
+  Ours (`workflow.js`): agents are matched to orchestrate runs by their session name (the
+  terminal title, `claude -n <run>-<suffix>`), else by worktree; the first tab's agent is the
+  run's lead. Levels: lead 5 + 2 per merged unit in the run, implementer 5 + 3 per merged unit
+  it owns, verifier 5 + 1 per two reviews. New agents hatch as first forms and evolve at Lv 16
+  and 32. A unit ready to merge puts a `PR #N` pill over its owner and the lead (click opens
+  it); a ready PR is checked on GitHub, so a merge shows at once: the owner hops and eats.
+  `!` when the unit, or the lead's run, needs you; a run that just closed dances.
 - `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`
   (orchestrate's `## Units` and `## Workers` tables; older single-table runs drop their stack
   summary rows and move session rows to workers). One row per PR: unit tag, PR title, a CI mark

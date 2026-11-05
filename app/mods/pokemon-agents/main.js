@@ -1,11 +1,17 @@
 // Pokémon agents: every agent is a pixel-art Pokémon roaming a strip at the bottom of the window.
 // Working ones walk around, idle ones stroll and nap, blocked ones stop and call for you.
 // Click one to go to its agent; right-click to choose which of the first 151 it is.
+//
+// Fork of github.com/mathieucroset/herdr-pokemon-agents@0fc10dc (MIT). Ours: the orchestrate
+// layer (workflow.js). Agents in an orchestrate run level up from merges and evolve at Lv 16
+// and 32; a PR waiting in Ready shows as a "PR #N" pill (click to open it); a merge makes the
+// owner hop and eat; "!" when the unit or the lead's run needs you; a closed run dances.
 import { View, div, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, theme, settings, run, props, shared, setShared, openOverlay, closeOverlay, nextCommand } from "herdr";
+import { agents as allAgents, focused, spaces, panes, exec, watchFolder, home, theme, settings, run, props, shared, setShared, openOverlay, closeOverlay, nextCommand } from "herdr";
 import { NAMES, COUNT, nameOf, dexNo } from "./names.js";
 import { loadSprite, ensureIcons, iconPath, imageMagick } from "./sprites.js";
+import { loadRuns, mapAgents, evolve, BASES } from "./workflow.js";
 
 const KEY = "pokemon-agents"; // shared state: { panes: { <pane id>: <dex number> } }
 const SLOT = 128; // width of one Pokémon's column (sprite + name tag)
@@ -17,6 +23,15 @@ const SLEEP_AFTER = 3 * 60 * 1000; // idle this long: fall asleep
 // ---- who is which Pokémon -------------------------------------------------------
 
 const slotOf = (a) => a.pane || a.address;
+
+// Ours: only the focused space's agents (an orchestrator's team), since every space at once
+// is too many to tell apart. Falls back to all agents when the space has none.
+function agents() {
+  const all = allAgents();
+  const space = focused()?.space;
+  const here = all.filter((a) => a.space === space);
+  return here.length ? here : all;
+}
 
 function savedPicks() {
   const s = shared(KEY);
@@ -48,8 +63,10 @@ function assign(list) {
   }
   for (const a of list) {
     if (ids[a.address]) continue;
-    let id = (hash(slotOf(a)) % COUNT) + 1;
-    for (let i = 0; i < COUNT && used.has(id); i++) id = (id % COUNT) + 1;
+    // First forms only: they evolve as their work merges (workflow.js).
+    let k = hash(slotOf(a)) % BASES.length;
+    for (let i = 0; i < BASES.length && used.has(BASES[k]); i++) k = (k + 1) % BASES.length;
+    const id = BASES[k];
     ids[a.address] = id;
     if (a.pane) fresh[a.pane] = id; // only remember agents that have a pane (sub-agents don't)
     used.add(id);
@@ -110,6 +127,21 @@ export default class PokemonAgents extends View {
       this.magick = !!(await imageMagick());
       cx.notify();
     });
+    this.work = {}; // address -> what workflow.js says about it
+    this.runs = [];
+    this.seen = {}; // address -> { merged, id } last tick, to notice a merge or an evolution
+    this.events = {}; // address -> { kind: "eat" | "evolve", until, from }
+    const reload = async (cx) => { this.runs = await loadRuns(panes().map((p) => p.cwd).filter(Boolean)); cx.notify(); };
+    cx.spawn(reload);
+    cx.timer.every(30000, (cx) => cx.spawn(reload));
+    for (const root of [`${home()}/.config/agent-orchestrate/runs`, `${home()}/.claude/orchestrate/runs`]) {
+      cx.spawn(async (cx) => {
+        for (;;) {
+          try { await watchFolder(root); } catch { return; }
+          await reload(cx);
+        }
+      });
+    }
     cx.timer.every(250, (cx) => this.tick(cx));
     // keys.json: "alt-shift-p": "pokemon-agents.pick" chooses the focused agent's Pokémon.
     cx.spawn(async () => {
@@ -143,8 +175,11 @@ export default class PokemonAgents extends View {
     const now = Date.now();
     const list = agents();
     const tabs = tabsById();
-    const { ids, fresh } = assign(list);
+    const { ids: picks, fresh } = assign(list);
     if (Object.keys(fresh).length) savePicks(fresh); // keeps new agents' Pokémon stable
+    const cwds = Object.fromEntries(panes().map((p) => [p.pane, p.cwd]));
+    this.work = mapAgents(list, (a) => cwds[a.pane], this.runs, now);
+    const ids = this.shown(list, picks, now);
     if (this.magick) for (const id of new Set(Object.values(ids))) this.want(id, cx);
 
     const lo = SLOT / 2;
@@ -159,7 +194,7 @@ export default class PokemonAgents extends View {
         m = this.mons[a.address] = { x, from: x, target: x, dir: Math.random() < 0.5 ? "l" : "r", moving: false, start: 0, dur: 0, pauseUntil: now + rand(300, 2500), mood: null };
         changed = true;
       }
-      const mood = moodOf(a, tabs, now);
+      const mood = this.mood(a, tabs, now);
       if (mood !== m.mood) { m.mood = mood; changed = true; }
       if (m.moving) {
         const f = clamp((now - m.start) / m.dur, 0, 1);
@@ -175,14 +210,14 @@ export default class PokemonAgents extends View {
           m.x = m.target;
           m.pauseUntil = now + (mood === "working" ? rand(300, 1800) : rand(4000, 12000));
           changed = true;
-        } else if (mood !== "working" && mood !== "idle") {
+        } else if (mood !== "working" && mood !== "idle" && mood !== "hungry") {
           // Stop where it is: something needs the person, or it fell asleep.
           m.x = m.target = m.from + (m.target - m.from) * f;
           m.moving = false;
           m.dur = 150;
           changed = true;
         }
-      } else if ((mood === "working" || mood === "idle") && now >= m.pauseUntil && hi > lo) {
+      } else if ((mood === "working" || mood === "idle" || mood === "hungry") && now >= m.pauseUntil && hi > lo) {
         let target = rand(lo, hi);
         if (Math.abs(target - m.x) < 60) target = m.x + (target >= m.x ? 60 : -60);
         target = clamp(target, lo, hi);
@@ -191,7 +226,7 @@ export default class PokemonAgents extends View {
           m.target = target;
           m.dir = target > m.x ? "r" : "l";
           m.start = now;
-          m.dur = (Math.abs(target - m.x) / SPEED[mood]) * 1000;
+          m.dur = (Math.abs(target - m.x) / (SPEED[mood] ?? SPEED.idle)) * 1000;
           m.moving = true;
           changed = true;
         } else {
@@ -202,6 +237,36 @@ export default class PokemonAgents extends View {
     });
     for (const k of Object.keys(this.mons)) if (!live.has(k)) { delete this.mons[k]; changed = true; }
     if (changed) cx.notify();
+  }
+
+  // The Pokémon each agent shows: its pick, evolved by its level. Notices merges (eat) and
+  // evolutions, and keeps each as an event for a few seconds.
+  shown(list, picks, now) {
+    const ids = {};
+    for (const a of list) {
+      const w = this.work[a.address];
+      const id = w ? evolve(picks[a.address], w.level, hash(slotOf(a))) : picks[a.address];
+      ids[a.address] = id;
+      const before = this.seen[a.address];
+      if (before?.work && w) { // only changes seen while running, not the first load
+        if (id !== before.id) this.events[a.address] = { kind: "evolve", until: now + 8000, from: before.id };
+        else if (w.merged > before.merged) this.events[a.address] = { kind: "eat", until: now + 5000 };
+      }
+      this.seen[a.address] = { id, merged: w?.merged ?? 0, work: Boolean(w) };
+    }
+    for (const [k, e] of Object.entries(this.events)) if (e.until < now) delete this.events[k];
+    return ids;
+  }
+
+  // Upstream's mood, then the workflow's: a party, an event, needs you, hungry for a merge.
+  mood(a, tabs, now) {
+    const w = this.work[a.address];
+    const e = this.events[a.address];
+    if (w?.party) return "party";
+    if (e) return e.kind;
+    if (w?.needs) return "blocked";
+    const base = moodOf(a, tabs, now);
+    return w?.ready.length && (base === "idle" || base === "sleep" || base === "done") ? "hungry" : base;
   }
 
   openPicker(a, id, tag) {
@@ -223,7 +288,9 @@ export default class PokemonAgents extends View {
     const now = Date.now();
     const list = agents();
     const tabs = tabsById();
-    const { ids } = assign(list);
+    const picks = assign(list).ids;
+    const ids = {};
+    for (const a of list) ids[a.address] = this.seen[a.address]?.id ?? picks[a.address];
     const ground = this.height - FEET;
 
     const root = div()
@@ -261,14 +328,19 @@ export default class PokemonAgents extends View {
 
     const order = [...list].sort((a, b) => (this.mons[a.address]?.x ?? 0) - (this.mons[b.address]?.x ?? 0));
     // Name tags never overlap: the ones that matter most (hovered, needs you, focused) win.
-    const rank = (a) => (this.hover === a.address ? 0 : a.status === "blocked" ? 1 : a.status === "done" ? 2 : a.focused ? 3 : 4);
+    const rank = (a) => (this.hover === a.address ? 0 : this.work[a.address]?.needs || a.status === "blocked" ? 1 : this.work[a.address]?.ready.length ? 2 : a.status === "done" ? 2 : a.focused ? 3 : 4);
+    const tagText = (a) => {
+      const w = this.work[a.address];
+      const base = w ? `${w.label} · Lv${w.level}` : tagOf(a, tabs);
+      return this.hover === a.address ? `${nameOf(ids[a.address])} · ${w ? `${w.summary}` : base}` : base;
+    };
     const placed = [];
     const showTag = new Set();
     for (const a of [...list].sort((x, y) => rank(x) - rank(y))) {
       const m = this.mons[a.address];
       const f = m?.moving ? clamp((now - m.start) / m.dur, 0, 1) : 1;
       const cx0 = m ? m.from + ((m.moving ? m.target : m.x) - m.from) * f : this.width / 2;
-      const text = this.hover === a.address ? `${nameOf(ids[a.address])} · ${tagOf(a, tabs)}` : tagOf(a, tabs);
+      const text = tagText(a);
       const half = Math.min(SLOT - 8, text.length * 6 + 18) / 2;
       if (placed.every(([l, r]) => cx0 + half + 6 < l || cx0 - half - 6 > r)) {
         placed.push([cx0 - half, cx0 + half]);
@@ -278,7 +350,8 @@ export default class PokemonAgents extends View {
     for (const a of order) {
       const id = ids[a.address];
       const m = this.mons[a.address] ?? { x: this.width / 2, target: this.width / 2, dir: "r", moving: false, dur: 0 };
-      const mood = m.mood ?? moodOf(a, tabs, now);
+      const mood = m.mood ?? this.mood(a, tabs, now);
+      const w = this.work[a.address];
       const meta = this.sprites[id];
       const tag = tagOf(a, tabs);
       const hovered = this.hover === a.address;
@@ -295,9 +368,13 @@ export default class PokemonAgents extends View {
         const top = ground - (s.box.y + s.box.h);
         headY = ground - s.box.h;
         const shadowW = Math.max(14, Math.round(s.box.w * 0.7));
+        const hop = mood === "party" || mood === "eat";
         body = div()
           .child(div().absolute().left(SLOT / 2 - shadowW / 2).top(ground - 2).w(shadowW).h(6).rounded_full().bg("#00000030"))
-          .child(image(s.path).absolute().left(left).top(top).w(s.w).h(s.h));
+          .child(div().absolute().left(0).top(0).w(SLOT).h(this.height)
+            .when(hop, (el) => el.loop("top", { from: 0, to: -10, period: mood === "party" ? 420 : 300 }))
+            .when(mood === "evolve", (el) => el.loop("opacity", { from: 0.25, to: 1, period: 500 }))
+            .child(image(s.path).absolute().left(left).top(top).w(s.w).h(s.h)));
       } else {
         // Loading (or no ImageMagick): a little Poké Ball waits in its place.
         const r = 9;
@@ -311,14 +388,25 @@ export default class PokemonAgents extends View {
           .child(div().absolute().left(r - 3).top(r - 3).size(6).rounded_full().bg("#f4f4f4").border_1().border_color(t.foreground));
       }
 
+      const pill = (text, bg) => div().px(6).rounded(7).bg(bg).text_color("#ffffff").font_bold().text_size(11).child(text);
+      const openPr = (n) => (_e, cx) => {
+        cx.stop_propagation();
+        exec("gh", ["pr", "view", String(n), "--web"], w?.cwd ? { cwd: w.cwd } : undefined);
+      };
       const bubble =
-        mood === "blocked" ? div().px(6).rounded(7).bg(t.blocked).text_color("#ffffff").font_bold().child("!")
+        mood === "party" ? pill("♪ run closed", t.done).frames(["♪ run closed", "♫ run closed"], 400)
+        : mood === "evolve" ? pill(`${nameOf(this.events[a.address]?.from)} is evolving!`, t.accent)
+        : mood === "eat" ? pill("nom nom · +1 merged", t.done)
+        : w?.ready.length && mood !== "blocked" ? h_flex().gap(3).children(w.ready.slice(0, 2).map((r, i) =>
+            div().id(`pr-${a.address}-${i}`).cursor_pointer().on_click(openPr(r.pr))
+              .child(pill(`PR #${r.pr}`, t.done))))
+        : mood === "blocked" ? div().px(6).rounded(7).bg(t.blocked).text_color("#ffffff").font_bold().child("!")
             .loop("opacity", { from: 0.7, to: 1, period: 900 })
-        : mood === "done" ? div().px(6).rounded(7).bg(t.done).text_color("#ffffff").font_bold().child("✓")
+        : mood === "done" && !w ? div().px(6).rounded(7).bg(t.done).text_color("#ffffff").font_bold().child("✓")
         : mood === "sleep" ? div().text_color(t.muted).frames(["z", "zZ", "zZz", "zZ"], 700)
         : null;
 
-      const name = hovered ? `${nameOf(id)} · ${tag}` : tag;
+      const name = tagText(a);
       root.child(
         div()
           .id(`mon-${a.address}`)
@@ -345,7 +433,7 @@ export default class PokemonAgents extends View {
             h_flex()
               .absolute().left(4).w(SLOT - 8).top(ground + 6).h(LABEL_H)
               .justify_center().items_center().gap(4)
-              .child(div().flex_none().size(6).rounded_full().bg(t[a.status] ?? t.idle))
+              .child(div().flex_none().size(6).rounded_full().bg(w?.needs ? t.blocked : w?.ready.length ? t.done : t[a.status] ?? t.idle))
               .child(
                 div().min_w(0).truncate().text_size(10.5)
                   .text_color(hovered || a.focused ? t.foreground : t.muted)

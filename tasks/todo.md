@@ -38,9 +38,16 @@ and the panel together, with heuristics for older runs.
 # Pokémon strip tied to orchestrate (2026-11-05)
 Fork of mathieucroset/herdr-pokemon-agents (MIT code; sprites downloaded at run time, never in
 this repo), placed as a strip under the terminals, plus a workflow layer (workflow.js).
-- [ ] vendor upstream mod files, credit and pin the commit
-- [ ] workflow.js: runs from state.md, agent -> run/units by worktree, role lead/worker/verifier
-- [ ] levels (merges / run merges / verifications), evolution at Lv 16 and 32, base forms for new agents
-- [ ] moods: hungry PR pill (click opens PR), eating on merge, "!" on needs-you, dance on close
-- [ ] strip in tanmay layout under the terminals; install-mods.sh copies it
-- [ ] verify: herdr-app check, screenshot, node test of the workflow mapping
+- [x] vendor upstream mod files, credit and pin the commit
+- [x] workflow.js: runs from state.md, agent -> run/units by worktree, role lead/worker/verifier
+- [x] levels (merges / run merges / verifications), evolution at Lv 16 and 32, base forms for new agents
+- [x] moods: hungry PR pill (click opens PR), eating on merge, "!" on needs-you, dance on close
+- [x] strip in tanmay layout under the terminals; install-mods.sh copies it
+- [x] verify: herdr-app check, screenshot, node test of the workflow mapping
+
+## Review (Pokémon strip)
+- Mapping test against the live window: wkfl-1085 lead Lv29, R owns R1-R5 + RR (Lv8 after RR
+  merged), A owns A1 W3 A2, verifiers by name; beta-readiness pills #17293 #17279 #17275 (open).
+- Title matching was needed: workers' terminal cwd is the orchestrator's folder, not their worktree.
+- herdr-app check passed, status errors []; screenshots of the wkfl-1085 and ticketing spaces.
+- Not seen live yet: the eat, evolve and dance animations (they need a merge or a close to happen).
