@@ -313,6 +313,17 @@ export default class JobPanel extends View {
     return entry;
   }
 
+  // Unresolved review threads on a PR (one GraphQL call); null when gh fails. Asked only for
+  // rows that claim ready: the merge gate needs every thread answered.
+  async openThreads(pr, cwd) {
+    const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(pr.url ?? "");
+    if (!m) return null;
+    const q = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved}}}}}";
+    const r = await sh("gh", ["api", "graphql", "-f", `query=${q}`, "-f", `o=${m[1]}`, "-f", `n=${m[2]}`, "-F", `p=${m[3]}`,
+      "-q", "[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length"], cwd);
+    return r.ok ? Number(r.out) : null;
+  }
+
   // Every open PR of mine in one call (about 6 s for 14 PRs), at most every 45 s, in the background.
   refreshMine(cx, cwd) {
     if (this.mineBusy || !cwd || Date.now() - this.mineAt < 45000) return;
@@ -323,7 +334,12 @@ export default class JobPanel extends View {
       if (r.ok) {
         const now = Date.now();
         const list = JSON.parse(r.out).map(slim);
-        for (const pr of list) this.prs.set(String(pr.number), { pr, at: now });
+        for (const pr of list) {
+          // Keep a thread count fetched for the same head; the list call does not carry it.
+          const old = this.prs.get(String(pr.number))?.pr;
+          if (old?.openThreads != null && old.headRefOid === pr.headRefOid) pr.openThreads = old.openThreads;
+          this.prs.set(String(pr.number), { pr, at: now });
+        }
         this.mine = list.map((pr) => String(pr.number));
         this.mineAt = now;
         savePrCache(this.prs);
@@ -417,7 +433,11 @@ export default class JobPanel extends View {
         if (done(r.gh?.pr)) return;
         this.fetching++;
         cx.notify();
-        r.gh = await this.fetchOne(r.number ?? r.branch, tabBranches.get(r.branch) ?? repoCwd);
+        const cwd = tabBranches.get(r.branch) ?? repoCwd;
+        r.gh = await this.fetchOne(r.number ?? r.branch, cwd);
+        if (r.gh?.pr?.state === "OPEN" && r.unit && (orchWord(r.unit.status).word === "ready" || r.brief)) {
+          r.gh.pr.openThreads = await this.openThreads(r.gh.pr, cwd);
+        }
         this.fetching--;
         cx.notify();
       }));
@@ -474,6 +494,7 @@ export default class JobPanel extends View {
     if (word === "ready") {
       if (!gh) return out("ready?", r.number ? "PR not loaded" : "no PR");
       if (verified && !sameSha(verified, pr.headRefOid)) return out("ready?", "head moved since verify");
+      if (pr.openThreads > 0) return out("ready?", `${pr.openThreads} open thread${pr.openThreads > 1 ? "s" : ""}`);
       const stale = verified === r.brief && r.brief ? "merge brief sent; state.md not updated" : null;
       return gh.green ? out("ready", [gh.approval, stale].filter(Boolean).join(" · ") || null) : out("ready?", gh.why);
     }
