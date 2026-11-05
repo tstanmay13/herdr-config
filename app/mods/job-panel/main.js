@@ -385,6 +385,19 @@ export default class JobPanel extends View {
 
       // One row per unit, then tabs whose branch no unit names. Cached PR data first.
       const rows = tb.units.map(unitRow);
+      // Merge briefs (merge-briefs/<unit id>.md): a brief for the PR's current head means the
+      // unit is ready even when the orchestrator has not written that to state.md yet.
+      if (run) {
+        const ls = await sh("/bin/sh", ["-c", 'for f in "$0"/merge-briefs/*.md; do [ -f "$f" ] && echo "$f"; done', run.dir]);
+        const files = new Map(ls.out.split("\n").filter(Boolean).map((f) => [f.split("/").pop().slice(0, -3), f]));
+        await Promise.all(rows.map(async (r) => {
+          const f = files.get(unitLabel(r.unit.unit).tag);
+          if (!f) return;
+          const text = (await readTextFile(f).catch(() => null)) ?? "";
+          const head = sha((/\bhead\b[^0-9a-f]{0,20}([0-9a-f]{7,40})/i.exec(text) ?? [])[1]);
+          if (head) r.brief = head;
+        }));
+      }
       for (const [b] of tabBranches) if (!rows.some((r) => r.branch === b)) rows.push({ key: `b:${b}`, unit: null, branch: b, number: null });
       for (const r of rows) r.gh = this.cached(r);
       for (const r of rows) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
@@ -451,12 +464,18 @@ export default class JobPanel extends View {
     if (final === "CLOSED") return out("closed");
     const gh = pr ? ghReady(pr) : null;
     if (!r.unit) return !gh ? out("open") : gh.green ? out("ready", gh.approval) : out("open", gh.why);
-    const { word, rest } = orchWord(r.unit.status);
+    let { word, rest } = orchWord(r.unit.status);
+    let verified = sha(r.unit["verified tip"]);
+    // A merge brief for the current head outranks a state.md row that was not updated.
+    if (r.brief && pr && sameSha(r.brief, pr.headRefOid) && !["ready", "merged", "dropped"].includes(word)) {
+      word = "ready";
+      verified = r.brief;
+    }
     if (word === "ready") {
       if (!gh) return out("ready?", r.number ? "PR not loaded" : "no PR");
-      const v = sha(r.unit["verified tip"]);
-      if (v && !sameSha(v, pr.headRefOid)) return out("ready?", "head moved since verify");
-      return gh.green ? out("ready", gh.approval) : out("ready?", gh.why);
+      if (verified && !sameSha(verified, pr.headRefOid)) return out("ready?", "head moved since verify");
+      const stale = verified === r.brief && r.brief ? "merge brief sent; state.md not updated" : null;
+      return gh.green ? out("ready", [gh.approval, stale].filter(Boolean).join(" · ") || null) : out("ready?", gh.why);
     }
     return out(word, rest.replace(/^(waiting|paused)\s*/i, "") || null);
   }
