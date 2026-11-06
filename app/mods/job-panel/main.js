@@ -9,7 +9,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, focused, spaces, panes, exec, home, readTextFile, watchFolder } from "herdr";
+import { theme, focused, spaces, panes, agents, exec, home, readTextFile, watchFolder, run as runCommand } from "herdr";
 
 const ROOTS = () => [`${home()}/.config/agent-orchestrate/runs`, `${home()}/.claude/orchestrate/runs`];
 const FIELDS = "number,title,state,isDraft,url,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,headRefName,baseRefName";
@@ -146,6 +146,27 @@ function spaceFolders() {
   const tabs = new Set((s?.tabs ?? []).map((t) => t.id));
   const cwds = [...new Set(panes().filter((p) => tabs.has(p.tab) && p.cwd).map((p) => p.cwd))];
   return { space: f?.space ?? null, cwds, focusedCwd: f?.cwd ?? null };
+}
+
+// The space a run lives in: the one with the most agents titled after it (Claude names its
+// sessions "<run>-<role>"), else the first whose task worktrees the run's state.md names.
+function spaceOfRun(r) {
+  const slug = r.name.replace(/^\d{4}-\d{2}-\d{2}-/, "");
+  const count = new Map();
+  for (const a of agents()) {
+    const title = String(a.title ?? "").trim();
+    if (!a.space || ![r.name, slug].some((n) => title === n || title.startsWith(`${n}-`))) continue;
+    count.set(a.space, (count.get(a.space) ?? 0) + 1);
+  }
+  const best = [...count].sort((x, y) => y[1] - x[1])[0];
+  if (best) return best[0];
+  const text = r.text ?? "";
+  for (const s of spaces()) {
+    const tabs = new Set((s.tabs ?? []).map((t) => t.id));
+    const keys = panes().filter((p) => tabs.has(p.tab) && p.cwd).map((p) => p.cwd.split("/").slice(-2).join("/"));
+    if (keys.some((k) => /-?worktrees\//.test(k) && text.includes(k))) return s.id;
+  }
+  return null;
 }
 
 // ---------- GitHub ----------
@@ -651,7 +672,12 @@ export default class JobPanel extends View {
       if (!need && !ready) return null;
       const first = o.asks[0] ?? orchWord(o.rows.find((r) => this.status(r, t).word === "needs-you")?.unit.status).rest ?? "";
       return v_flex().id(`other-${i}`).px(8).py(4).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => pick(o.run.name)(cx))
+        .on_click((_e, cx) => {
+          // Go to the run's own space (its board follows); pin it here only when no space has it.
+          const sp = spaceOfRun(o.run);
+          if (sp && sp !== this.space) runCommand("space.select", { id: sp });
+          else pick(o.run.name)(cx);
+        })
         .child(h_flex().gap(6)
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(runName(o.run.name)))
           .when(need > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.blocked).child(`${need} need you`)))
