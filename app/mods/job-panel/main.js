@@ -169,6 +169,19 @@ function spaceOfRun(r) {
   return null;
 }
 
+// Merge briefs (merge-briefs/<unit tag or PR number>.md): sets r.brief to the head each brief was written for.
+async function addBriefs(dir, rows) {
+  const ls = await sh("/bin/sh", ["-c", 'for f in "$0"/merge-briefs/*.md; do [ -f "$f" ] && echo "$f"; done', dir]);
+  const files = new Map(ls.out.split("\n").filter(Boolean).map((f) => [f.split("/").pop().slice(0, -3), f]));
+  await Promise.all(rows.map(async (r) => {
+    const f = r.unit && (files.get(unitLabel(r.unit.unit).tag) ?? files.get(String(r.number ?? "")));
+    if (!f) return;
+    const text = (await readTextFile(f).catch(() => null)) ?? "";
+    const head = sha((/\bhead\b[^0-9a-f]{0,20}([0-9a-f]{7,40})/i.exec(text) ?? [])[1]);
+    if (head) r.brief = head;
+  }));
+}
+
 // ---------- GitHub ----------
 
 function checks(rollup) {
@@ -405,7 +418,10 @@ export default class JobPanel extends View {
         if (this.finished.get(r.name) === true || r.name === run?.name) continue;
         r.text = r.text ?? (await read(r));
         const t = tables(r.text);
-        const rows = t.units.filter((u) => ["needs-you", "ready"].includes(orchWord(u.status).word)).map(unitRow);
+        // Rows that need you or that the orchestrator staged as ready (status ready, or a merge brief).
+        const all = t.units.map(unitRow).filter((x) => !["merged", "dropped"].includes(orchWord(x.unit.status).word));
+        await addBriefs(r.dir, all);
+        const rows = all.filter((x) => x.brief || ["needs-you", "ready"].includes(orchWord(x.unit.status).word));
         const asks = [runAsk(r.text), ...t.workers.filter((w) => orchWord(w.status).word === "needs-you")
           .map((w) => `${w.name}: ${orchWord(w.status).rest}`)].filter(Boolean);
         if (rows.length || asks.length) others.push({ run: r, rows, asks });
@@ -424,17 +440,7 @@ export default class JobPanel extends View {
       const rows = tb.units.map(unitRow);
       // Merge briefs (merge-briefs/<unit id>.md): a brief for the PR's current head means the
       // unit is ready even when the orchestrator has not written that to state.md yet.
-      if (run) {
-        const ls = await sh("/bin/sh", ["-c", 'for f in "$0"/merge-briefs/*.md; do [ -f "$f" ] && echo "$f"; done', run.dir]);
-        const files = new Map(ls.out.split("\n").filter(Boolean).map((f) => [f.split("/").pop().slice(0, -3), f]));
-        await Promise.all(rows.map(async (r) => {
-          const f = files.get(unitLabel(r.unit.unit).tag);
-          if (!f) return;
-          const text = (await readTextFile(f).catch(() => null)) ?? "";
-          const head = sha((/\bhead\b[^0-9a-f]{0,20}([0-9a-f]{7,40})/i.exec(text) ?? [])[1]);
-          if (head) r.brief = head;
-        }));
-      }
+      if (run) await addBriefs(run.dir, rows);
       for (const [b] of tabBranches) if (!rows.some((r) => r.branch === b)) rows.push({ key: `b:${b}`, unit: null, branch: b, number: null });
       for (const r of rows) r.gh = this.cached(r);
       for (const r of rows) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
@@ -668,8 +674,17 @@ export default class JobPanel extends View {
       for (const r of o.rows) r.gh = this.cached(r);
       const words = o.rows.map((r) => this.status(r, t).word);
       const need = o.asks.length + words.filter((w) => w === "needs-you").length;
-      const ready = words.filter((w) => w === "ready").length;
+      // Staged ready by the orchestrator. GitHub data is only from the cache here, so a missing
+      // PR does not hide a row; a cached merged/closed PR or a head that moved past the brief does.
+      const staged = o.rows.filter((r, i) => {
+        if (["merged", "closed"].includes(words[i])) return false;
+        if (words[i] === "ready" || words[i] === "ready?") return true;
+        const head = r.gh?.pr?.headRefOid;
+        return Boolean(r.brief) && (!head || sameSha(r.brief, head));
+      });
+      const ready = staged.length;
       if (!need && !ready) return null;
+      const readyLine = staged.map((r) => (r.number ? `#${r.number}` : unitLabel(r.unit.unit).tag || r.unit.unit)).join(" ");
       const first = o.asks[0] ?? orchWord(o.rows.find((r) => this.status(r, t).word === "needs-you")?.unit.status).rest ?? "";
       return v_flex().id(`other-${i}`).px(8).py(4).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => {
@@ -682,7 +697,8 @@ export default class JobPanel extends View {
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(runName(o.run.name)))
           .when(need > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.blocked).child(`${need} need you`)))
           .when(ready > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.done).child(`${ready} ready`))))
-        .when(Boolean(first), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(first)));
+        .when(Boolean(first), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(first)))
+        .when(ready > 0, (el) => el.child(div().truncate().text_size(11).text_color(t.done).child(`ready to merge: ${readyLine}`)));
     }).filter(Boolean);
 
     return root
