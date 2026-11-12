@@ -45,7 +45,16 @@ const tagOf = (unit) => (/^([A-Z0-9][A-Za-z0-9-]{0,5})\s+\S/.exec(unit ?? "") ??
 // Units and workers from state.md: "## Units" / "## Workers", or one older mixed table.
 function parse(md) {
   const lines = md.split("\n");
-  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.trim());
+  // As orchestrate's sweep.py: a row with an extra or missing cell keeps its left half aligned
+  // from the left and its right half (status, PR, last checked) from the right.
+  const align = (header, c) => {
+    const half = Math.floor(header.length / 2);
+    return Object.fromEntries(header.map((h, k) => {
+      const j = c.length === header.length || k < half ? k : k - header.length + c.length;
+      return [h, k >= half && j < half ? "" : c[j] ?? ""];
+    }));
+  };
   const units = [], workers = [];
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim().startsWith("|")) continue;
@@ -53,7 +62,7 @@ function parse(md) {
     let j = i + 2;
     for (; j < lines.length && lines[j].trim().startsWith("|"); j++) {
       const c = cells(lines[j]);
-      const row = Object.fromEntries(header.map((h, k) => [h, c[k] ?? ""]));
+      const row = align(header, c);
       const { word } = wordOf(row.status);
       if (header.includes("worker")) {
         workers.push({ name: row.worker, role: row.role || (/verifier/i.test(row.worker) ? "verifier" : "worker"), worktree: worktreeKey(row.worktree), session: row.session ?? "", word });

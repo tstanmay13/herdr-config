@@ -9,6 +9,9 @@
 //
 // Pay: implementer 3 per merged unit it owns, lead 2 per merged unit in its run,
 // verifier 1 per two reviews in its run. Level = 5 + floor(xp), up to 100.
+// Mini runs (orchestrate mini): implementers and verifiers are subagents of the lead, never on
+// screen, so the lead's line also takes the implementer pay for units a subagent built and the
+// review pay for the run's reviews.
 import { shared, setShared } from "herdr";
 
 const KEY = "pokemon-agents.box";
@@ -46,16 +49,20 @@ export function settle(box, seen, runs) {
   const sessions = Object.entries(box.sessions);
   for (const r of runs) {
     const here = sessions.filter(([, s]) => s.run === r.name);
+    const subs = (r.workers ?? []).filter((w) => /^subagent/i.test(w.session ?? ""));
+    const bySub = (u) => subs.some((w) => names(u.impl, w.name));
     for (const u of r.units) {
       if (u.word !== "merged") continue;
       for (const [name, s] of here) {
         if (s.role === "worker" && names(u.impl, name)) pay(`m:${r.name}:${u.name}:${name}`, s.line, PAY.worker);
         if (s.role === "lead") pay(`l:${r.name}:${u.name}:${name}`, s.line, PAY.lead);
+        if (s.role === "lead" && bySub(u)) pay(`m:${r.name}:${u.name}:${name}`, s.line, PAY.worker);
       }
     }
-    // Reviews are a count per run: pay each verifier line for the reviews since it last looked.
+    // Reviews are a count per run: pay each verifier line for the reviews since it last looked
+    // (in a mini run, the lead's line).
     for (const [name, s] of here) {
-      if (s.role !== "verifier") continue;
+      if (s.role !== "verifier" && !(s.role === "lead" && subs.length)) continue;
       const key = `v:${r.name}:${name}`;
       const before = typeof box.credited[key] === "number" ? box.credited[key] : 0;
       if (r.verifications > before) {

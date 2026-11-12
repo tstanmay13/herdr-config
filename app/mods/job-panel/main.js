@@ -38,23 +38,35 @@ async function listRuns() {
   return runs.sort((a, b) => b.mtime - a.mtime);
 }
 
+// A table row's cells; "\|" inside a cell is not a separator.
+const cellsOf = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.trim());
+// A row mapped to its header, as orchestrate's sweep.py does: a row with a missing or extra cell
+// (an unescaped "|" in a note) keeps its left half aligned from the left and its right half
+// (status, PR, last checked) aligned from the right.
+function align(header, row) {
+  if (row.length === header.length) return Object.fromEntries(header.map((h, k) => [h, row[k]]));
+  const half = Math.floor(header.length / 2);
+  const got = {};
+  header.forEach((h, i) => {
+    const j = i < half ? i : i - header.length + row.length;
+    got[h] = (i < half || j >= half) ? row[j] ?? "" : "";
+  });
+  return got;
+}
+
 // state.md's tables: "## Units" (one row per PR) and "## Workers" (one row per session).
 // Older runs keep everything in one unit table, with stack summary rows ("R1-R5 runs stack")
 // and session rows ("verifier-2") mixed in: summaries are dropped, sessions become workers.
 function tables(md) {
   const lines = md.split("\n");
-  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
   const units = [], workers = [];
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim().startsWith("|")) continue;
-    const header = cells(lines[i]).map((h) => h.toLowerCase());
+    const header = cellsOf(lines[i]).map((h) => h.toLowerCase());
     const rows = [];
     let j = i + 2;
-    for (; j < lines.length && lines[j].trim().startsWith("|"); j++) {
-      const c = cells(lines[j]);
-      rows.push(Object.fromEntries(header.map((h, k) => [h, c[k] ?? ""])));
-    }
-    if (header.includes("worker")) workers.push(...rows.map((r) => ({ name: r.worker, role: r.role ?? "", status: r.status ?? "" })));
+    for (; j < lines.length && lines[j].trim().startsWith("|"); j++) rows.push(align(header, cellsOf(lines[j])));
+    if (header.includes("worker")) workers.push(...rows.map((r) => ({ name: r.worker, role: r.role ?? "", status: r.status ?? "", session: r.session ?? "" })));
     else if (header.includes("unit")) units.push(...rows);
     i = j - 1;
   }
@@ -136,6 +148,44 @@ const ago = (mtime) => {
   const d = Date.now() / 1000 - mtime;
   return d < 90 ? "just now" : d < 3600 ? `${Math.round(d / 60)}m ago` : d < 86400 ? `${Math.round(d / 3600)}h ago` : `${Math.round(d / 86400)}d ago`;
 };
+
+// Worker sessions the human can close: a port of orchestrate's scripts/sweep.py
+// closeable_sessions. With a Workers table, a row is free when its own status is merged, done or
+// dropped, or says "can be closed". Without one, a session named in the units' implementer or
+// verifier column is free when every unit it appears on is finished. In a closed run every named
+// session is free. Mini-run subagents (session "subagent") and undated note names are skipped.
+function closeableSessions(md) {
+  const FIN = ["merged", "done", "dropped"];
+  const wordOf = (st) => (/^[a-z-]+/.exec(String(st ?? "").trim().toLowerCase()) ?? [""])[0];
+  const cells = cellsOf;
+  const closed = /^\*\*Closed:\*\*/m.test(md);
+  const lines = md.split("\n");
+  const hasWorkers = lines.some((l) => l.startsWith("|") && ["worker", "status"].every((h) => cells(l).map((c) => c.toLowerCase()).includes(h)));
+  const named = (name, ref) => (/^[0-9a-f]{4,}$/.test(String(ref ?? "").replace(/[[\]]/g, "").trim()) || /^\d{4}-\d{2}-\d{2}-/.test(name) ? name : null);
+  const free = new Set(), holds = new Map();
+  let header = null;
+  for (const line of lines) {
+    if (!line.startsWith("|")) { header = null; continue; }
+    const row = cells(line);
+    if (!header) { header = row.map((h) => h.toLowerCase()); continue; }
+    if (/^[-:\s|]*$/.test(line)) continue;
+    const get = align(header, row);
+    if (header.includes("worker") && header.includes("status")) {
+      const name = named((get.worker ?? "").split(/\s+/)[0], get.session);
+      if (!name || /stray/.test(get.worker) || /^subagent/.test(get.session ?? "")) continue;
+      if (closed || FIN.includes(wordOf(get.status)) || /can be closed/i.test(get.status)) free.add(name);
+    } else if (header.includes("unit") && !hasWorkers) {
+      const done = FIN.includes(wordOf(get.status));
+      for (const col of ["implementer", "verifier"]) {
+        const m = /^([\w.-]+)\s*(\[[0-9a-f]{4,}\])?/.exec((get[col] ?? "").trim());
+        const name = m && named(m[1], m[2]);
+        if (name) holds.set(name, [...(holds.get(name) ?? []), done]);
+      }
+    }
+  }
+  for (const [name, held] of holds) if (closed || (held.length && held.every(Boolean))) free.add(name);
+  return [...free].sort();
+}
 
 // ---------- the focused space ----------
 
@@ -409,7 +459,8 @@ export default class JobPanel extends View {
           if (keys.some((k) => r.text.includes(k))) { run = r; break; }
         }
       }
-      const tb = run ? tables(run.text ?? (await read(run))) : { units: [], workers: [] };
+      if (run) run.text = run.text ?? (await read(run));
+      const tb = run ? tables(run.text) : { units: [], workers: [] };
       const ask = run ? runAsk(run.text ?? "") : null;
 
       // Other unfinished runs: what needs you there (state.md only; PR data from the cache).
@@ -444,7 +495,7 @@ export default class JobPanel extends View {
       for (const [b] of tabBranches) if (!rows.some((r) => r.branch === b)) rows.push({ key: `b:${b}`, unit: null, branch: b, number: null });
       for (const r of rows) r.gh = this.cached(r);
       for (const r of rows) if (r.branch && r.branch === focusedBranch) this.open.add(r.key);
-      const view = { run, rows, focusedBranch, workers: tb.workers, ask };
+      const view = { run, rows, focusedBranch, workers: tb.workers, ask, closeable: run ? closeableSessions(run.text ?? "") : [] };
       this.runs = runs;
       this.view = view;
       this.spaceViews.set(space, view);
@@ -647,7 +698,11 @@ export default class JobPanel extends View {
         .child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child("needs you"))
         .child(div().flex_1().min_w(0).whitespace_normal().child(v.ask)));
       const busyW = v.workers.filter((w) => orchWord(w.status).word === "working");
-      const otherW = v.workers.filter((w) => !["working", "merged", "dropped"].includes(orchWord(w.status).word));
+      // Sessions the human can close, by sweep.py's rule: the row's own status is merged, done or
+      // dropped, or says "can be closed". A mini run's subagents (session "subagent") end with the run.
+      const sub = (w) => /^subagent/i.test(w.session ?? "");
+      const closeable = v.closeable ?? [];
+      const otherW = v.workers.filter((w) => !closeable.includes(w.name) && !["working", "merged", "done", "dropped"].includes(orchWord(w.status).word));
       for (const [i, w] of otherW.entries()) {
         const { word: ww, rest } = orchWord(w.status);
         body.push(h_flex().id(`worker-${i}`).px(8).gap(6).text_size(11)
@@ -655,8 +710,11 @@ export default class JobPanel extends View {
           .child(div().flex_none().text_color(t.foreground).child(w.name))
           .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(rest)));
       }
+      const kind = v.workers.length && v.workers.every(sub) ? "subagents" : "sessions";
       if (v.workers.length) body.push(div().px(8).text_size(11).text_color(t.dim)
-        .child(`${busyW.length} of ${v.workers.length} sessions working: ${busyW.map((w) => w.name).join(", ")}`).truncate());
+        .child(`${busyW.length} of ${v.workers.length} ${kind} working: ${busyW.map((w) => w.name).join(", ")}`).truncate());
+      if (closeable.length) body.push(div().px(8).text_size(11).text_color(t.dim).whitespace_normal()
+        .child(`can close: ${closeable.map((n) => n.replace(`${v.run?.name}-`, "")).join(", ")}`));
       let n = 0;
       for (const g of GROUPS) {
         const items = live.filter((x) => x.g === g);

@@ -44,7 +44,9 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   run's lead. XP goes into a box (`box.js`, shared state `pokemon-agents.box`) on the Pokémon
   line, not the session, because implementers are one-off: 3 per merged unit an implementer
   owns (paid even after its session exits, from the session name state.md records), 2 per
-  merged unit to the run's lead, 1 per two reviews to a verifier. Level = 5 + XP; lines evolve
+  merged unit to the run's lead, 1 per two reviews to a verifier. In an `orchestrate mini` run the
+  implementers and verifiers are subagents (Workers `session` = `subagent`), never on screen, so
+  the lead's line also takes their pay. Level = 5 + XP; lines evolve
   at Lv 16 and 32. A new agent is handed a line from the box that is not on screen, so it can
   arrive already evolved; a fresh first form only when every boxed line is out. A unit ready to merge puts a `PR #N` pill over its owner and the lead (click opens
   it); a ready PR is checked on GitHub, so a merge shows at once: the owner hops and eats.
@@ -61,7 +63,10 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   head is the verified SHA, every check passed, no conflicts; otherwise the group says why.
   Stacked PRs sit indented under their base, which covers gh-stack stacks and hand-made
   ones, because both are PRs based on another PR's branch. The run's `**Needs you:**` line
-  and any worker waiting on you sit above the groups. "Other runs" lists one line per
+  and any worker waiting on you sit above the groups, then "can close:" with the worker sessions
+  whose work is finished (the same rule as orchestrate's `scripts/sweep.py`; mini-run subagents are
+  left out). Rows with a stray `|` are read the way sweep.py reads them: left half from the left,
+  right half (status, PR, last checked) from the right. "Other runs" lists one line per
   unfinished run where something needs you or is ready; click it to switch. Chips pick
   another run; "my open PRs" lists every open PR of mine with stacks indented.
   Finished runs are hidden ("+N finished" shows them): `**Closed:**` in `state.md`, every
