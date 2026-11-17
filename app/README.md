@@ -67,7 +67,7 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   newest run's items again. Logic: `forYou.js` and `state.js`; tests:
   `node app/tests/for-you.test.mjs`; live dry run (reads only): `node app/tests/for-you-dry-run.mjs`.
   The panel also publishes shared `orchestrate.flags` ({ agent address: { run, ready, need } }
-  for each run's orchestrator: the first agent tab of the run's space, found by `<run>-<role>`
+  for every open run's orchestrator, 0 to-dos included: the first agent tab of the run's space, found by `<run>-<role>`
   titles, worktrees, then a space or agent title naming the run, for mini runs).
 - `agents-tanmay`: Herdr's Agents list, cloned from `agents` 0.1.14 (`mod.clone`), used by the
   tanmay layout instead of `agents`. Ours: an "Orchestrators" section under Pinned with every open
