@@ -9,7 +9,9 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, focused, spaces, panes, agents, exec, home, readTextFile, watchFolder, run as runCommand } from "herdr";
+import { theme, focused, spaces, panes, agents, exec, home, readTextFile, watchFolder, run as runCommand, shared, setShared, notify, nextCommand } from "herdr";
+import { forYouItems, newItems, notice } from "./forYou.js";
+import { tables, runAsk, orchWord, strictWord, prNumber, cellsOf, align } from "./state.js";
 
 const ROOTS = () => [`${home()}/.config/agent-orchestrate/runs`, `${home()}/.claude/orchestrate/runs`];
 const FIELDS = "number,title,state,isDraft,url,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,headRefName,baseRefName";
@@ -38,59 +40,8 @@ async function listRuns() {
   return runs.sort((a, b) => b.mtime - a.mtime);
 }
 
-// A table row's cells; "\|" inside a cell is not a separator.
-const cellsOf = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.trim());
-// A row mapped to its header, as orchestrate's sweep.py does: a row with a missing or extra cell
-// (an unescaped "|" in a note) keeps its left half aligned from the left and its right half
-// (status, PR, last checked) aligned from the right.
-function align(header, row) {
-  if (row.length === header.length) return Object.fromEntries(header.map((h, k) => [h, row[k]]));
-  const half = Math.floor(header.length / 2);
-  const got = {};
-  header.forEach((h, i) => {
-    const j = i < half ? i : i - header.length + row.length;
-    got[h] = (i < half || j >= half) ? row[j] ?? "" : "";
-  });
-  return got;
-}
 
-// state.md's tables: "## Units" (one row per PR) and "## Workers" (one row per session).
-// Older runs keep everything in one unit table, with stack summary rows ("R1-R5 runs stack")
-// and session rows ("verifier-2") mixed in: summaries are dropped, sessions become workers.
-function tables(md) {
-  const lines = md.split("\n");
-  const units = [], workers = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim().startsWith("|")) continue;
-    const header = cellsOf(lines[i]).map((h) => h.toLowerCase());
-    const rows = [];
-    let j = i + 2;
-    for (; j < lines.length && lines[j].trim().startsWith("|"); j++) rows.push(align(header, cellsOf(lines[j])));
-    if (header.includes("worker")) workers.push(...rows.map((r) => ({ name: r.worker, role: r.role ?? "", status: r.status ?? "", session: r.session ?? "" })));
-    else if (header.includes("unit")) units.push(...rows);
-    i = j - 1;
-  }
-  const kept = [];
-  for (const u of units) {
-    const name = u.unit ?? "";
-    if (prNumber(u.pr)) { kept.push(u); continue; }
-    if (/\bstack\b/i.test(name) || /\b[A-Z]+\d+\s*-\s*[A-Z]*\d+\b/.test(name)) continue;
-    const w = orchWord(u.status).word;
-    if (w !== "merged" && w !== "dropped" && (/^verifier\b/i.test(name) || /^detached\b/i.test(u.branch ?? ""))) {
-      workers.push({ name, role: /verifier/i.test(name) ? "verifier" : "worker", status: u.status ?? "" });
-      continue;
-    }
-    kept.push(u);
-  }
-  return { units: kept, workers };
-}
 
-// The run-wide "**Needs you:**" line, unless it says nothing is open.
-function runAsk(md) {
-  const m = /^\*\*Needs you:\*\*\s*(.+)$/m.exec(md);
-  const text = m?.[1].trim();
-  return text && !/^(nothing|none|no\b|n\/a|-)/i.test(text) ? text : null;
-}
 
 // Where a unit is in the gates: the stage column, or (older runs) the first stage the note names.
 const STAGES = ["build", "self-check", "ai-review", "verify", "fix", "merge", "real-run", "done"];
@@ -141,7 +92,6 @@ function stackOrder(items) {
 }
 
 const sha = (s) => (String(s ?? "").match(/\b[0-9a-f]{7,40}\b/) ?? [""])[0];
-const prNumber = (s) => (/\b\d{3,}\b/.exec(String(s ?? "")) ?? [null])[0];
 const sameSha = (a, b) => Boolean(a && b) && (a.startsWith(b.slice(0, 7)) || b.startsWith(a.slice(0, 7)));
 const short = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const ago = (mtime) => {
@@ -299,22 +249,22 @@ const done = (pr) => pr && pr.state !== "OPEN"; // merged/closed never change: n
 const WORDS = ["needs-you", "ready", "working", "waiting", "paused", "merged", "dropped"];
 const RANK = { "needs-you": 0, ready: 1, "ready?": 1, open: 2, working: 2, waiting: 3, paused: 4, dropped: 5, closed: 5, merged: 6 };
 
-// The orchestrator's word for a unit: the leading word of the status cell, or, for runs written
-// before the word list existed, a guess from the text. Returns { word, rest }.
-function orchWord(status) {
-  const s = String(status ?? "").trim();
-  const m = /^(needs-you|ready|working|waiting|paused|merged|dropped)\b\s*[:;,-]?\s*/i.exec(s);
-  if (m) return { word: m[1].toLowerCase(), rest: s.slice(m[0].length) };
-  const guess =
-    /^merged\b/i.test(s) ? "merged"
-    : /^(ready\b|merge gate met|ready gate passed)/i.test(s) || /\bmerge gate met\b/i.test(s) ? "ready"
-    : /\b(needs (you|tanmay)|ask(ing)? tanmay|decision needed|question for tanmay)\b/i.test(s) ? "needs-you"
-    : /^(paused|on hold|hold\b)|\bpaused\b|\bon hold\b/i.test(s) ? "paused"
-    : /^(waiting|after\b|blocked on|waits? (for|on))/i.test(s) ? "waiting"
-    : /^(dropped|abandoned|closed)\b/i.test(s) ? "dropped"
-    : "working";
-  return { word: guess, rest: s };
+
+
+// For you: every open run with a state.md changed in the last 14 days (newest 15).
+// Returns { <run>: items }, ready first. A run without a state.md is never listed.
+async function forYouByRun(runs, read) {
+  const byRun = {};
+  for (const r of runs.filter((x) => Date.now() / 1000 - x.mtime < 14 * 86400).slice(0, 15)) {
+    r.text = r.text ?? (await read(r));
+    if (!r.text || /^\*\*Closed:\*\*/m.test(r.text)) continue;
+    const t = tables(r.text);
+    byRun[r.name] = forYouItems(r.name, { units: t.units, workers: t.workers, ask: runAsk(r.text) }, strictWord, prNumber);
+  }
+  return byRun;
 }
+
+const SEEN = "job-panel.forYou.seen"; // shared: { <run>: [item keys] }, so every copy fires once
 
 // What GitHub says about an open PR: green (mergeable now) and, if not, why not.
 function ghReady(pr) {
@@ -349,6 +299,7 @@ export default class JobPanel extends View {
     this.finished = new Map(); // run name -> true | false | null
     this.states = loadStates(); // PR number -> MERGED | CLOSED (final states only)
     this.others = []; // [{ run, rows, asks }]: other unfinished runs with something for you
+    this.forYou = []; // items across runs: ready to send for approval, then needs you
     this.showDone = false;
     this.showFinished = false;
     this.reload(cx, true);
@@ -360,6 +311,18 @@ export default class JobPanel extends View {
       else if (c !== this.cwd) { this.cwd = c; this.markFocused(cx); }
     });
     cx.timer.every(60000, (cx) => this.reload(cx, true));
+    // `herdr-app do job-panel.replay` (or a key): notify the newest run's for-you items again.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c !== "replay") continue;
+        const runs = await listRuns();
+        const read = async (r) => (await readTextFile(`${r.dir}/state.md`).catch(() => null)) ?? "";
+        const byRun = await forYouByRun(runs, read);
+        const newest = runs.find((r) => byRun[r.name]?.length);
+        if (newest) this.announce(byRun, runs, newest.name);
+      }
+    });
     for (const root of ROOTS()) {
       cx.spawn(async (cx) => {
         for (;;) {
@@ -436,6 +399,27 @@ export default class JobPanel extends View {
   }
 
   // withGitHub: false re-reads only state.md and keeps the cached GitHub data.
+  // One silent in-app notification per run with new for-you items (the toast mod plays no
+  // sound); clicking it opens the run's space. The seen keys are shared state, so two copies of
+  // the panel, or a reload of the mod, never fire the same item twice.
+  announce(byRun, runs, replay = null) {
+    const { fresh, next } = newItems(shared(SEEN), byRun);
+    setShared(SEEN, next);
+    // job-panel.replay: post the newest run's current items again (a dismissed notice, a check).
+    if (replay) for (const k of Object.keys(fresh)) delete fresh[k];
+    if (replay && byRun[replay]?.length) fresh[replay] = byRun[replay];
+    for (const [name, items] of Object.entries(fresh)) {
+      // Two runs with the same slug (wire-release on 4 and 6 Nov) get their date to tell them apart.
+      const slug = (n) => n.replace(/^\d{4}-\d{2}-\d{2}-/, "");
+      const twin = Object.keys(byRun).some((n) => n !== name && slug(n) === slug(name));
+      const { title, body } = notice(twin ? `${slug(name)} (${name.slice(5, 10)})` : slug(name), items);
+      const r = runs.find((x) => x.name === name);
+      const sp = r ? spaceOfRun(r) : null;
+      notify({ title, body, level: items.some((x) => x.word === "needs-you") ? "warning" : "success", timeout: 20000,
+        ...(sp ? { action: { name: "space.select", args: { id: sp } } } : {}) });
+    }
+  }
+
   reload(cx, withGitHub) {
     const seq = ++this.seq;
     cx.spawn(async (cx) => {
@@ -478,6 +462,10 @@ export default class JobPanel extends View {
         if (rows.length || asks.length) others.push({ run: r, rows, asks });
       }
       this.others = others;
+
+      const byRun = await forYouByRun(runs, read);
+      this.forYou = Object.values(byRun).flat().sort((a, b) => (a.word === "ready" ? 0 : 1) - (b.word === "ready" ? 0 : 1));
+      this.announce(byRun, runs);
 
       // Branches open in this space's tabs, all at once (any one cwd per worktree is enough).
       const branchOf = await Promise.all([...cwds, focusedCwd].map(async (c) => (c ? (await sh("git", ["branch", "--show-current"], c)).out : "")));
@@ -759,7 +747,40 @@ export default class JobPanel extends View {
         .when(ready > 0, (el) => el.child(div().truncate().text_size(11).text_color(t.done).child(`ready to merge: ${readyLine}`)));
     }).filter(Boolean);
 
+    // For you: one row per item across runs, ready first. The place to look instead of scrolling
+    // back in an orchestrator pane. Row: go to the run's space; PR number: open the PR.
+    const FY_MAX = 8;
+    const fyEls = this.forYou.slice(0, FY_MAX).map((x, i) => {
+      const r = this.runs.find((y) => y.name === x.run);
+      const go = (cx) => {
+        const sp = r ? spaceOfRun(r) : null;
+        if (sp && sp !== this.space) runCommand("space.select", { id: sp });
+        else pick(x.run)(cx);
+      };
+      const openPr = (_e, cx) => {
+        cx.stop_propagation();
+        if (x.url) exec("open", [x.url]);
+        else exec("gh", ["pr", "view", String(x.pr), "--web"], { cwd: this.cwd ?? home() });
+      };
+      return v_flex().id(`fy-${i}`).px(8).py(4).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => go(cx))
+        .child(h_flex().gap(6)
+          .child(div().flex_none().text_size(11).font_semibold().text_color(x.word === "ready" ? t.done : t.blocked)
+            .child(x.word === "ready" ? "ready" : "needs you"))
+          .child(div().flex_none().text_size(11).text_color(t.dim).child(runName(x.run)
+            + (this.forYou.some((y) => y.run !== x.run && runName(y.run) === runName(x.run)) ? ` ${x.run.slice(5, 10)}` : "")))
+          .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(x.unit || "run"))
+          .when(Boolean(x.pr), (el) => el.child(div().id(`fy-pr-${i}`).flex_none().text_size(11).text_color(t.accent ?? t.foreground)
+            .hover((s) => s.underline()).on_click(openPr).child(`#${x.pr}`))))
+        .when(Boolean(x.ask), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(x.ask)));
+    });
+    const fyMore = this.forYou.length - fyEls.length;
+
     return root
+      .when(fyEls.length > 0, (el) => el
+        .child(label(`FOR YOU · ${this.forYou.filter((x) => x.word === "ready").length} ready · ${this.forYou.filter((x) => x.word !== "ready").length} need you`))
+        .child(v_flex().gap(3).children(fyEls)
+          .when(fyMore > 0, (el) => el.child(div().px(8).text_size(11).text_color(t.dim).child(`+${fyMore} more`)))))
       .child(h_flex().gap(4).flex_wrap().children(chips))
       .child(label(
         this.mode === "mine" ? `MY OPEN PRS · ${live.length} open · ${fresh}${busy}`

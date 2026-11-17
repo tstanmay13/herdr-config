@@ -51,6 +51,16 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   arrive already evolved; a fresh first form only when every boxed line is out. A unit ready to merge puts a `PR #N` pill over its owner and the lead (click opens
   it); a ready PR is checked on GitHub, so a merge shows at once: the owner hops and eats.
   `!` when the unit, or the lead's run, needs you; a run that just closed dances.
+- `job-panel` "For you" (top of the panel): one row per item across open runs (state.md changed
+  in the last 14 days) whose status starts with `ready` (ready to send for approval) or
+  `needs-you`, plus each run's `**Needs you:**` line and workers that need you. Ready first.
+  Click a row to go to the run's space, the PR number to open the PR. These are not Herdr's
+  "Needs you" (an agent blocked on a question); nothing here changes an agent's state. When a
+  run gains an item (unit id + status word, so a changed note never re-fires), one silent
+  in-app notification per run batches its new items; click it to go to the run's space. The
+  first start takes a baseline and fires nothing. `herdr-app do job-panel.replay` posts the
+  newest run's items again. Logic: `forYou.js` and `state.js`; tests:
+  `node app/tests/for-you.test.mjs`; live dry run (reads only): `node app/tests/for-you-dry-run.mjs`.
 - `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`
   (orchestrate's `## Units` and `## Workers` tables; older single-table runs drop their stack
   summary rows and move session rows to workers). One row per PR: unit tag, PR title, a CI mark
