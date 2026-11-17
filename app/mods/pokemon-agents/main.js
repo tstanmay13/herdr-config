@@ -435,10 +435,12 @@ export default class PokemonAgents extends View {
         : mood === "flag" ? (() => {
             const f = flagOf(a);
             const n = f ? f.ready + f.need : 0;
-            const text = n ? `${n} for you` : "for you";
+            // Text, not hue, says what kind: "✓ N to approve" when something waits on approval or merge.
+            const text = f?.ready ? `${f.ready} to approve${f.need ? ` +${f.need}` : ""}` : n ? `${n} for you` : "for you";
+            const mark = f?.ready ? ["\u2713", "\u2714"] : ["\u2691", "\u2690"];
             return div().id(`flag-${a.address}`).cursor_pointer().on_click((_e, cx) => { cx.stop_propagation(); run("pane.focus", { pane: a.pane }); })
-              .tooltip(f ? [f.ready && `${f.ready} ready to send for approval`, f.need && `${f.need} need you`].filter(Boolean).join(", ") : "a unit needs you")
-              .child(pill(`\u2691 ${text}`, f?.ready ? t.done : t.accent).frames([`\u2691 ${text}`, `\u2690 ${text}`], 600));
+              .tooltip(f ? [f.ready && `${f.ready} to approve or merge`, f.need && `${f.need} other to-do${f.need > 1 ? "s" : ""}`].filter(Boolean).join(", ") : "a unit needs you")
+              .child(pill(`${mark[0]} ${text}`, t.accent).frames([`${mark[0]} ${text}`, `${mark[1]} ${text}`], 600));
           })()
         : w?.ready.length ? h_flex().gap(3).children(w.ready.slice(0, 2).map((r, i) =>
             div().id(`pr-${a.address}-${i}`).cursor_pointer().on_click(openPr(r.pr))

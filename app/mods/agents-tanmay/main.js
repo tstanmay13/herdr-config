@@ -247,8 +247,13 @@ export default class Agents extends View {
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
-    const rest = list.filter((a) => !a.pinned);
-    list = [...pinned, ...rest];
+    // Ours: every open orchestrate run's orchestrator (shared "orchestrate.flags", from the job
+    // panel) in its own section under Pinned, most to-dos first, instead of deep in Done or Idle.
+    const orchFlags = shared("orchestrate.flags") ?? {};
+    const todo = (a) => (orchFlags[a.address]?.ready ?? 0) + (orchFlags[a.address]?.need ?? 0);
+    const orch = list.filter((a) => !a.pinned && orchFlags[a.address]).sort((x, y) => todo(y) - todo(x));
+    const rest = list.filter((a) => !a.pinned && !orchFlags[a.address]);
+    list = [...pinned, ...orch, ...rest];
     setAgentOrder(list.map((a) => a.address));
 
     const withKids = (a, i) => {
@@ -343,7 +348,7 @@ export default class Agents extends View {
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
-      const full = byPriority || isPinned;
+      const full = byPriority || isPinned || Boolean(orchFlags[a.address]);
       // Ours: orchestrate items waiting for Tanmay in this agent's run. Not a status: the agent
       // is not blocked, so it stays where its own state puts it.
       const flag = (shared("orchestrate.flags") ?? {})[a.address];
@@ -375,10 +380,14 @@ export default class Agents extends View {
         .child(h_flex().flex_1().min_w(0).gap(5).items_center()
           .child(div().min_w(0).max_w(full && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
           .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
+        // Told apart by text and fill, not hue (themes and colour vision vary): something to
+        // approve or merge is a filled "✓ N to approve" pill; other to-dos a tinted "⚑ N for you".
         .when(flagN > 0, el => el.child(div().id(`flag-${a.address}`).flex_none().px(6).h(18).rounded(5).text_size(10.5)
-          .flex().items_center().bg((flag.ready ? t.done : t.accent) + "1f").text_color(flag.ready ? t.done : t.accent)
-          .tooltip(`${flag.run}: ${[flag.ready && `${flag.ready} ready to send for approval`, flag.need && `${flag.need} need you`].filter(Boolean).join(", ")}`)
-          .child(`\u2691 ${flagN} for you`)))
+          .flex().items_center()
+          .when(flag.ready > 0, el => el.bg(t.accent).text_color("#ffffff").font_semibold())
+          .when(!flag.ready, el => el.bg(t.accent + "1f").text_color(t.accent))
+          .tooltip(`${flag.run}: ${[flag.ready && `${flag.ready} to approve or merge`, flag.need && `${flag.need} other to-do${flag.need > 1 ? "s" : ""}`].filter(Boolean).join(", ")}`)
+          .child(flag.ready ? `\u2713 ${flag.ready} to approve${flag.need ? ` +${flag.need}` : ""}` : `\u2691 ${flagN} for you`)))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
@@ -389,6 +398,7 @@ export default class Agents extends View {
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
+    if (orch.length) groups.push({ id: "orchestrators", label: "Orchestrators", status: null, members: orch });
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
       const id = byPriority ? `sec-${r}` : `sp-${a.space}`;

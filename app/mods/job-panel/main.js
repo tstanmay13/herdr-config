@@ -431,8 +431,9 @@ export default class JobPanel extends View {
   // The agents-tanmay list and the Pokémon strip draw "⚑ N for you" from it. Display only.
   publishFlags(byRun, runs) {
     const flags = {};
+    // Every open run's orchestrator is listed, 0 to-dos included: the agents-tanmay list shows
+    // them in an Orchestrators section; the pills and the Pokémon flag show only when N > 0.
     for (const [name, items] of Object.entries(byRun)) {
-      if (!items.length) continue;
       const r = runs.find((x) => x.name === name);
       const sp = r ? spaceOfRun(r) : null;
       const lead = sp ? agents().filter((a) => a.space === sp).sort((x, y) => x.tab_index - y.tab_index)[0] : null;
@@ -791,6 +792,8 @@ export default class JobPanel extends View {
       if (x.todo) return v_flex().id(`fy-${i}`).px(8).py(4).gap(2).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => go(cx))
         .child(h_flex().gap(6)
+          .when(x.word === "ready", (el) => el.child(div().flex_none().px(4).rounded(4).bg(t.accent).text_color("#ffffff")
+            .text_size(10.5).font_semibold().child("\u2713 to approve")))
           .child(div().flex_none().text_size(11).text_color(t.dim).child(runName(x.run)))
           .child(div().flex_1())
           .children(x.prs.slice(0, 3).map((n, k) => div().id(`fy-pr-${i}-${k}`).flex_none().text_size(11).text_color(t.accent)

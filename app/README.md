@@ -52,7 +52,7 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   it); a ready PR is checked on GitHub, so a merge shows at once: the owner hops and eats.
   `!` only when the agent is blocked on a question (Herdr's meaning). When its run has items for
   you (`orchestrate.flags`), or a worker's own unit needs you, it stops and waves a "⚑ N for
-  you" flag (click: go to it). A run that just closed dances.
+  you" flag, or "✓ N to approve" when an approval waits (click: go to it). A run that just closed dances.
 - `job-panel` "For you" (top of the panel): the human's to-dos across open runs (state.md changed
   in the last 14 days). A run with a `## For you` section (orchestrate 9e8d2e0) counts only its
   `- ` lines, one item each, keyed by the line's text; "Approve…"/"Merge…" lines count as ready
@@ -70,8 +70,11 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   for each run's orchestrator: the first agent tab of the run's space, found by `<run>-<role>`
   titles, worktrees, then a space or agent title naming the run, for mini runs).
 - `agents-tanmay`: Herdr's Agents list, cloned from `agents` 0.1.14 (`mod.clone`), used by the
-  tanmay layout instead of `agents`. Ours: a "⚑ N for you" pill on an orchestrator's row from
-  `orchestrate.flags`, green when something is ready to send for approval. It is not a status:
+  tanmay layout instead of `agents`. Ours: an "Orchestrators" section under Pinned with every open
+  run's orchestrator (most to-dos first), so they are not lost in Done or Idle; and a pill on an
+  orchestrator's row from `orchestrate.flags`. The pill is told apart by text and fill, not hue:
+  a filled "✓ N to approve (+M)" when an Approve/Merge item waits, a tinted "⚑ N for you"
+  otherwise (the Pokémon flag and the For you list's "✓ to approve" tag match). It is not a status:
   the row stays in its own section, and Herdr's "Needs you" still means blocked on a question.
   A clone gets no upstream updates; to take one, clone again and re-apply the flag lines.
 - `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`
