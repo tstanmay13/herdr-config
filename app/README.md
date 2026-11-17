@@ -50,7 +50,9 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   at Lv 16 and 32. A new agent is handed a line from the box that is not on screen, so it can
   arrive already evolved; a fresh first form only when every boxed line is out. A unit ready to merge puts a `PR #N` pill over its owner and the lead (click opens
   it); a ready PR is checked on GitHub, so a merge shows at once: the owner hops and eats.
-  `!` when the unit, or the lead's run, needs you; a run that just closed dances.
+  `!` only when the agent is blocked on a question (Herdr's meaning). When its run has items for
+  you (`orchestrate.flags`), or a worker's own unit needs you, it stops and waves a "⚑ N for
+  you" flag (click: go to it). A run that just closed dances.
 - `job-panel` "For you" (top of the panel): one row per item across open runs (state.md changed
   in the last 14 days) whose status starts with `ready` (ready to send for approval) or
   `needs-you`, plus each run's `**Needs you:**` line and workers that need you. Ready first.
@@ -61,6 +63,14 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   first start takes a baseline and fires nothing. `herdr-app do job-panel.replay` posts the
   newest run's items again. Logic: `forYou.js` and `state.js`; tests:
   `node app/tests/for-you.test.mjs`; live dry run (reads only): `node app/tests/for-you-dry-run.mjs`.
+  The panel also publishes shared `orchestrate.flags` ({ agent address: { run, ready, need } }
+  for each run's orchestrator: the first agent tab of the run's space, found by `<run>-<role>`
+  titles, worktrees, then a space or agent title naming the run, for mini runs).
+- `agents-tanmay`: Herdr's Agents list, cloned from `agents` 0.1.14 (`mod.clone`), used by the
+  tanmay layout instead of `agents`. Ours: a "⚑ N for you" pill on an orchestrator's row from
+  `orchestrate.flags`, green when something is ready to send for approval. It is not a status:
+  the row stays in its own section, and Herdr's "Needs you" still means blocked on a question.
+  A clone gets no upstream updates; to take one, clone again and re-apply the flag lines.
 - `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`
   (orchestrate's `## Units` and `## Workers` tables; older single-table runs drop their stack
   summary rows and move session rows to workers). One row per PR: unit tag, PR title, a CI mark

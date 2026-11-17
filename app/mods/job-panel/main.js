@@ -166,7 +166,12 @@ function spaceOfRun(r) {
     const keys = panes().filter((p) => tabs.has(p.tab) && p.cwd).map((p) => p.cwd.split("/").slice(-2).join("/"));
     if (keys.some((k) => /-?worktrees\//.test(k) && text.includes(k))) return s.id;
   }
-  return null;
+  // A mini run has no "<run>-<role>" sessions and its own worktree may not be in state.md:
+  // a space named after the run ("public-api-prod-release"), else an agent whose title names it.
+  const has = (x) => String(x ?? "").toLowerCase().includes(slug.toLowerCase());
+  const named = spaces().find((s) => has(s.name) || has(String(s.folder ?? "").split("/").pop()));
+  if (named) return named.id;
+  return agents().find((a) => a.space && has(a.title))?.space ?? null;
 }
 
 // Merge briefs (merge-briefs/<unit tag or PR number>.md): sets r.brief to the head each brief was written for.
@@ -264,6 +269,7 @@ async function forYouByRun(runs, read) {
   return byRun;
 }
 
+const FLAGS = "orchestrate.flags"; // shared: { <agent address>: { run, ready, need } }
 const SEEN = "job-panel.forYou.seen"; // shared: { <run>: [item keys] }, so every copy fires once
 
 // What GitHub says about an open PR: green (mergeable now) and, if not, why not.
@@ -420,6 +426,23 @@ export default class JobPanel extends View {
     }
   }
 
+  // Shared "orchestrate.flags": { <agent address>: { run, ready, need } } for each run's
+  // orchestrator (the first agent tab of the run's space, as the Pokémon strip picks its lead).
+  // The agents-tanmay list and the Pokémon strip draw "⚑ N for you" from it. Display only.
+  publishFlags(byRun, runs) {
+    const flags = {};
+    for (const [name, items] of Object.entries(byRun)) {
+      if (!items.length) continue;
+      const r = runs.find((x) => x.name === name);
+      const sp = r ? spaceOfRun(r) : null;
+      const lead = sp ? agents().filter((a) => a.space === sp).sort((x, y) => x.tab_index - y.tab_index)[0] : null;
+      if (!lead) continue;
+      const f = (flags[lead.address] ??= { run: name, ready: 0, need: 0 });
+      for (const x of items) x.word === "ready" ? f.ready++ : f.need++;
+    }
+    if (JSON.stringify(flags) !== JSON.stringify(shared(FLAGS) ?? {})) setShared(FLAGS, flags);
+  }
+
   reload(cx, withGitHub) {
     const seq = ++this.seq;
     cx.spawn(async (cx) => {
@@ -466,6 +489,7 @@ export default class JobPanel extends View {
       const byRun = await forYouByRun(runs, read);
       this.forYou = Object.values(byRun).flat().sort((a, b) => (a.word === "ready" ? 0 : 1) - (b.word === "ready" ? 0 : 1));
       this.announce(byRun, runs);
+      this.publishFlags(byRun, runs);
 
       // Branches open in this space's tabs, all at once (any one cwd per worktree is enough).
       const branchOf = await Promise.all([...cwds, focusedCwd].map(async (c) => (c ? (await sh("git", ["branch", "--show-current"], c)).out : "")));

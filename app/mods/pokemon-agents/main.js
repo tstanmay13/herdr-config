@@ -28,6 +28,13 @@ const slotOf = (a) => a.pane || a.address;
 
 // Ours: only the focused space's agents (an orchestrator's team), since every space at once
 // is too many to tell apart. Falls back to all agents when the space has none.
+// The job panel's "⚑ N for you" for an agent: { run, ready, need } when it leads a run with
+// orchestrate items waiting for the person (shared "orchestrate.flags", keyed by agent address).
+const flagOf = (a) => {
+  const f = (shared("orchestrate.flags") ?? {})[a.address];
+  return f && f.ready + f.need > 0 ? f : null;
+};
+
 function agents() {
   const all = allAgents();
   const space = focused()?.space;
@@ -286,7 +293,11 @@ export default class PokemonAgents extends View {
     const e = this.events[a.address];
     if (w?.party) return "party";
     if (e) return e.kind;
-    if (w?.needs) return "blocked";
+    // An agent blocked on a question keeps Herdr's meaning ("!"). Orchestrate items for the
+    // person (the job panel's flags on a run's lead, or a worker's own needs-you unit) are not
+    // blocking: the Pokémon stops and waves a flag instead.
+    if (a.status === "blocked") return "blocked";
+    if (w?.needs || flagOf(a)) return "flag";
     const base = moodOf(a, tabs, now);
     return w?.ready.length && (base === "idle" || base === "sleep" || base === "done") ? "hungry" : base;
   }
@@ -350,7 +361,7 @@ export default class PokemonAgents extends View {
 
     const order = [...list].sort((a, b) => (this.mons[a.address]?.x ?? 0) - (this.mons[b.address]?.x ?? 0));
     // Name tags never overlap: the ones that matter most (hovered, needs you, focused) win.
-    const rank = (a) => (this.hover === a.address ? 0 : this.work[a.address]?.needs || a.status === "blocked" ? 1 : this.work[a.address]?.ready.length ? 2 : a.status === "done" ? 2 : a.focused ? 3 : 4);
+    const rank = (a) => (this.hover === a.address ? 0 : this.work[a.address]?.needs || flagOf(a) || a.status === "blocked" ? 1 : this.work[a.address]?.ready.length ? 2 : a.status === "done" ? 2 : a.focused ? 3 : 4);
     const tagText = (a) => {
       const w = this.work[a.address];
       const base = w ? `${w.label} · Lv${w.level}` : tagOf(a, tabs);
@@ -419,11 +430,19 @@ export default class PokemonAgents extends View {
         mood === "party" ? pill("♪ run closed", t.done).frames(["♪ run closed", "♫ run closed"], 400)
         : mood === "evolve" ? pill(`${nameOf(this.events[a.address]?.from)} is evolving!`, t.accent)
         : mood === "eat" ? pill("nom nom · +1 merged", t.done)
-        : w?.ready.length && mood !== "blocked" ? h_flex().gap(3).children(w.ready.slice(0, 2).map((r, i) =>
-            div().id(`pr-${a.address}-${i}`).cursor_pointer().on_click(openPr(r.pr))
-              .child(pill(`PR #${r.pr}`, t.done))))
         : mood === "blocked" ? div().px(6).rounded(7).bg(t.blocked).text_color("#ffffff").font_bold().child("!")
             .loop("opacity", { from: 0.7, to: 1, period: 900 })
+        : mood === "flag" ? (() => {
+            const f = flagOf(a);
+            const n = f ? f.ready + f.need : 0;
+            const text = n ? `${n} for you` : "for you";
+            return div().id(`flag-${a.address}`).cursor_pointer().on_click((_e, cx) => { cx.stop_propagation(); run("pane.focus", { pane: a.pane }); })
+              .tooltip(f ? [f.ready && `${f.ready} ready to send for approval`, f.need && `${f.need} need you`].filter(Boolean).join(", ") : "a unit needs you")
+              .child(pill(`\u2691 ${text}`, f?.ready ? t.done : t.accent).frames([`\u2691 ${text}`, `\u2690 ${text}`], 600));
+          })()
+        : w?.ready.length ? h_flex().gap(3).children(w.ready.slice(0, 2).map((r, i) =>
+            div().id(`pr-${a.address}-${i}`).cursor_pointer().on_click(openPr(r.pr))
+              .child(pill(`PR #${r.pr}`, t.done))))
         : mood === "done" && !w ? div().px(6).rounded(7).bg(t.done).text_color("#ffffff").font_bold().child("✓")
         : mood === "sleep" ? div().text_color(t.muted).frames(["z", "zZ", "zZz", "zZ"], 700)
         : null;
@@ -455,7 +474,7 @@ export default class PokemonAgents extends View {
             h_flex()
               .absolute().left(4).w(SLOT - 8).top(ground + 6).h(LABEL_H)
               .justify_center().items_center().gap(4)
-              .child(div().flex_none().size(6).rounded_full().bg(w?.needs ? t.blocked : w?.ready.length ? t.done : t[a.status] ?? t.idle))
+              .child(div().flex_none().size(6).rounded_full().bg(a.status === "blocked" ? t.blocked : w?.needs || flagOf(a) ? t.accent : w?.ready.length ? t.done : t[a.status] ?? t.idle))
               .child(
                 div().min_w(0).truncate().text_size(10.5)
                   .text_color(hovered || a.focused ? t.foreground : t.muted)
