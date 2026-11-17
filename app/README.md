@@ -77,23 +77,30 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   otherwise (the Pokémon flag and the For you list's "✓ to approve" tag match). It is not a status:
   the row stays in its own section, and Herdr's "Needs you" still means blocked on a question.
   A clone gets no upstream updates; to take one, clone again and re-apply the flag lines.
+- `job-panel` Activity (under For you): what changed in the focused space's run since you last
+  looked, newest first: a unit going ready, merged, needing you or dropped, moving stage, the
+  verifier passing a new tip, a new unit, a line added to or gone from `## For you`. Each reload
+  compares every open run's `state.md` with its last snapshot (shared `job-panel.activity`, 40
+  events per run, so switching spaces shows history at once); a status note changing alone is
+  not an event. "new" (a text tag) marks events since you last left that run's space. Logic:
+  `activity.js`; tests: `node app/tests/activity.test.mjs`.
 - `job-panel`: a board of the orchestrate run in the focused space, read from its `state.md`
   (orchestrate's `## Units` and `## Workers` tables; older single-table runs drop their stack
   summary rows and move session rows to workers). One row per PR: unit tag, PR title, a CI mark
   (`✗2` red checks, `●` running, `✓` green, `conflict`), `on #N` when the PR is stacked on
   another open PR, and the PR number. Click a row to open the PR, `on #N` to open the base,
-  and the chevron for the orchestrator's note, owners, branch and red checks. Rows are grouped:
-  needs you, ready, then by the unit's `stage` (merge, fix, verify, ai-review, self-check,
+  and the chevron for the orchestrator's note, owners, branch and red checks. Rows are grouped by
+  the unit's `stage` (a ready unit under merge; needs you and ready live in For you, not here) (merge, fix, verify, ai-review, self-check,
   build; older runs: guessed from the note), then waiting; merged units fold at the bottom
   with a count of those still needing a real run. `ready` shows only when GitHub agrees: the
   head is the verified SHA, every check passed, no conflicts; otherwise the group says why.
   Stacked PRs sit indented under their base, which covers gh-stack stacks and hand-made
-  ones, because both are PRs based on another PR's branch. The run's `**Needs you:**` line
-  and any worker waiting on you sit above the groups, then "can close:" with the worker sessions
+  ones, because both are PRs based on another PR's branch. Waiting workers sit above
+  the groups, then "can close:" with the worker sessions
   whose work is finished (the same rule as orchestrate's `scripts/sweep.py`; mini-run subagents are
   left out). Rows with a stray `|` are read the way sweep.py reads them: left half from the left,
-  right half (status, PR, last checked) from the right. "Other runs" lists one line per
-  unfinished run where something needs you or is ready; click it to switch. Chips pick
+  right half (status, PR, last checked) from the right. Other runs are reached through
+  the Agents list's Orchestrators section or For you rows. Chips pick
   another run; "my open PRs" lists every open PR of mine with stacks indented.
   Finished runs are hidden ("+N finished" shows them): `**Closed:**` in `state.md`, every
   unit's PR merged or closed, or every PR merged or closed and `state.md` quiet for 3 days.

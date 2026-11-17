@@ -11,6 +11,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { theme, focused, spaces, panes, agents, exec, home, readTextFile, watchFolder, run as runCommand, shared, setShared, notify, nextCommand } from "herdr";
 import { forYouItems, newItems, notice } from "./forYou.js";
+import { snapshot, record, ago as since } from "./activity.js";
 import { tables, runAsk, orchWord, strictWord, prNumber, cellsOf, align, forYouSection } from "./state.js";
 
 const ROOTS = () => [`${home()}/.config/agent-orchestrate/runs`, `${home()}/.claude/orchestrate/runs`];
@@ -270,6 +271,8 @@ async function forYouByRun(runs, read) {
 }
 
 const FLAGS = "orchestrate.flags"; // shared: { <agent address>: { run, ready, need } }
+const ACT = "job-panel.activity"; // shared: { <run>: { snap, events } }
+const LOOKED = "job-panel.activity.looked"; // shared: { <run>: ms when you last left its space }
 const SEEN = "job-panel.forYou.seen"; // shared: { <run>: [item keys] }, so every copy fires once
 
 // What GitHub says about an open PR: green (mergeable now) and, if not, why not.
@@ -304,7 +307,7 @@ export default class JobPanel extends View {
     this.open = new Set();
     this.finished = new Map(); // run name -> true | false | null
     this.states = loadStates(); // PR number -> MERGED | CLOSED (final states only)
-    this.others = []; // [{ run, rows, asks }]: other unfinished runs with something for you
+    this.showAllActivity = false;
     this.forYou = []; // items across runs: ready to send for approval, then needs you
     this.showDone = false;
     this.showFinished = false;
@@ -313,7 +316,12 @@ export default class JobPanel extends View {
     cx.timer.every(300, (cx) => {
       const s = focused()?.space ?? null;
       const c = focused()?.cwd ?? null;
-      if (s !== this.space) { this.pinned = null; this.open = new Set(); this.reload(cx, true); }
+      if (s !== this.space) {
+        // Leaving a run's space: what it showed counts as seen; later events are "new".
+        const left = this.view?.run?.name;
+        if (left) setShared(LOOKED, { ...(shared(LOOKED) ?? {}), [left]: Date.now() });
+        this.pinned = null; this.open = new Set(); this.reload(cx, true);
+      }
       else if (c !== this.cwd) { this.cwd = c; this.markFocused(cx); }
     });
     cx.timer.every(60000, (cx) => this.reload(cx, true));
@@ -444,6 +452,21 @@ export default class JobPanel extends View {
     if (JSON.stringify(flags) !== JSON.stringify(shared(FLAGS) ?? {})) setShared(FLAGS, flags);
   }
 
+  // Activity: compare every open run's state.md with its last snapshot and keep what changed
+  // (shared, so it survives reloads and every copy agrees). Only the focused run is shown.
+  recordActivity(runs, names) {
+    let store = shared(ACT) ?? {};
+    const before = JSON.stringify(store);
+    const now = Date.now();
+    for (const name of names) {
+      const r = runs.find((x) => x.name === name);
+      if (!r?.text) continue;
+      const t = tables(r.text);
+      store = record(store, name, snapshot(t.units, forYouSection(r.text), orchWord, prNumber), now);
+    }
+    if (JSON.stringify(store) !== before) setShared(ACT, store);
+  }
+
   reload(cx, withGitHub) {
     const seq = ++this.seq;
     cx.spawn(async (cx) => {
@@ -471,26 +494,12 @@ export default class JobPanel extends View {
       const tb = run ? tables(run.text) : { units: [], workers: [] };
       const ask = run ? runAsk(run.text ?? "") : null;
 
-      // Other unfinished runs: what needs you there (state.md only; PR data from the cache).
-      const others = [];
-      for (const r of runs.slice(0, 12)) {
-        if (this.finished.get(r.name) === true || r.name === run?.name) continue;
-        r.text = r.text ?? (await read(r));
-        const t = tables(r.text);
-        // Rows that need you or that the orchestrator staged as ready (status ready, or a merge brief).
-        const all = t.units.map(unitRow).filter((x) => !["merged", "dropped"].includes(orchWord(x.unit.status).word));
-        await addBriefs(r.dir, all);
-        const rows = all.filter((x) => x.brief || ["needs-you", "ready"].includes(orchWord(x.unit.status).word));
-        const asks = [runAsk(r.text), ...t.workers.filter((w) => orchWord(w.status).word === "needs-you")
-          .map((w) => `${w.name}: ${orchWord(w.status).rest}`)].filter(Boolean);
-        if (rows.length || asks.length) others.push({ run: r, rows, asks });
-      }
-      this.others = others;
 
       const byRun = await forYouByRun(runs, read);
       this.forYou = Object.values(byRun).flat().sort((a, b) => (a.word === "ready" ? 0 : 1) - (b.word === "ready" ? 0 : 1));
       this.announce(byRun, runs);
       this.publishFlags(byRun, runs);
+      this.recordActivity(runs, Object.keys(byRun));
 
       // Branches open in this space's tabs, all at once (any one cwd per worktree is enough).
       const branchOf = await Promise.all([...cwds, focusedCwd].map(async (c) => (c ? (await sh("git", ["branch", "--show-current"], c)).out : "")));
@@ -595,10 +604,10 @@ export default class JobPanel extends View {
   // The board group a run row goes in.
   group(r, st) {
     if (RANK[st.word] >= 5) return "done";
-    if (st.word === "needs-you") return "needs you";
-    if (st.word === "ready" || st.word === "ready?") return "ready";
-    if (st.word === "waiting" || st.word === "paused") return "waiting";
+    // No "needs you" or "ready" groups: those are in For you. A unit sits under its stage.
     if (!r.unit) return "other PRs in this space";
+    if (st.word === "ready" || st.word === "ready?") return "merge";
+    if (st.word === "waiting" || st.word === "paused") return "waiting";
     return r.stage && r.stage !== "done" && r.stage !== "real-run" ? r.stage : "working";
   }
 
@@ -691,31 +700,26 @@ export default class JobPanel extends View {
       .map((x) => ({ ...x, w: x.st.word, g: this.mode === "mine" ? null : this.group(x.r, x.st) }));
     const live = rows.filter((x) => RANK[x.w] < 5);
     const done = rows.filter((x) => RANK[x.w] >= 5);
-    const needN = live.filter((x) => x.w === "needs-you").length + v.workers.filter((w) => orchWord(w.status).word === "needs-you").length + (v.ask ? 1 : 0);
-    const readyN = live.filter((x) => x.w === "ready").length;
-    const summary = [needN && `${needN} need you`, readyN && `${readyN} ready`, `${live.length} open`].filter(Boolean).join(" · ");
+    const summary = [`${live.length} open`, done.length && `${done.length} merged or closed`].filter(Boolean).join(" · ");
 
     const ats = live.map((x) => x.r.gh?.at).filter(Boolean); // merged PRs are never refetched
     const fresh = ats.length ? `GitHub ${ago(Math.min(...ats) / 1000)}` : "GitHub not loaded yet";
     const busy = this.fetching > 0 ? " · updating…" : "";
 
     // Body: in a run, groups by stage; in "my open PRs", every PR with stacks indented.
-    const GROUPS = ["needs you", "ready", "merge", "fix", "verify", "ai-review", "self-check", "build", "working", "waiting", "other PRs in this space"];
-    const GC = { "needs you": t.blocked, ready: t.done };
+    const GROUPS = ["merge", "fix", "verify", "ai-review", "self-check", "build", "working", "waiting", "other PRs in this space"];
+    const GC = {};
     const body = [];
     if (this.mode === "mine") {
       stackOrder(live.sort((a, b) => RANK[a.w] - RANK[b.w])).forEach((x, i) => body.push(row(x.r, `row-${i}`, { word: true, depth: x.depth })));
     } else {
-      // The run's own ask and the workers that need something, above the units.
-      if (v.ask) body.push(h_flex().id("run-ask").px(8).py(5).gap(6).rounded(6).bg(t.background)
-        .child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child("needs you"))
-        .child(div().flex_1().min_w(0).whitespace_normal().child(v.ask)));
+      // The run's ask and workers that need you are in For you; waiting workers stay here.
       const busyW = v.workers.filter((w) => orchWord(w.status).word === "working");
       // Sessions the human can close, by sweep.py's rule: the row's own status is merged, done or
       // dropped, or says "can be closed". A mini run's subagents (session "subagent") end with the run.
       const sub = (w) => /^subagent/i.test(w.session ?? "");
       const closeable = v.closeable ?? [];
-      const otherW = v.workers.filter((w) => !closeable.includes(w.name) && !["working", "merged", "done", "dropped"].includes(orchWord(w.status).word));
+      const otherW = v.workers.filter((w) => !closeable.includes(w.name) && !["working", "merged", "done", "dropped", "needs-you"].includes(orchWord(w.status).word));
       for (const [i, w] of otherW.entries()) {
         const { word: ww, rest } = orchWord(w.status);
         body.push(h_flex().id(`worker-${i}`).px(8).gap(6).text_size(11)
@@ -740,37 +744,6 @@ export default class JobPanel extends View {
       this.mode === "mine" ? (this.mine ? "No open PRs." : "Loading your PRs…") : "No PRs for the branches open here."));
     const realRun = done.filter((x) => x.r.stage === "real-run" || /real-run[^;|]*pending/i.test(x.r.unit?.status ?? "")).length;
 
-    // Other runs: one line each, only when something there needs you or is ready to merge.
-    const otherEls = this.mode === "mine" ? [] : this.others.map((o, i) => {
-      for (const r of o.rows) r.gh = this.cached(r);
-      const words = o.rows.map((r) => this.status(r, t).word);
-      const need = o.asks.length + words.filter((w) => w === "needs-you").length;
-      // Staged ready by the orchestrator. GitHub data is only from the cache here, so a missing
-      // PR does not hide a row; a cached merged/closed PR or a head that moved past the brief does.
-      const staged = o.rows.filter((r, i) => {
-        if (["merged", "closed"].includes(words[i])) return false;
-        if (words[i] === "ready" || words[i] === "ready?") return true;
-        const head = r.gh?.pr?.headRefOid;
-        return Boolean(r.brief) && (!head || sameSha(r.brief, head));
-      });
-      const ready = staged.length;
-      if (!need && !ready) return null;
-      const readyLine = staged.map((r) => (r.number ? `#${r.number}` : unitLabel(r.unit.unit).tag || r.unit.unit)).join(" ");
-      const first = o.asks[0] ?? orchWord(o.rows.find((r) => this.status(r, t).word === "needs-you")?.unit.status).rest ?? "";
-      return v_flex().id(`other-${i}`).px(8).py(4).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => {
-          // Go to the run's own space (its board follows); pin it here only when no space has it.
-          const sp = spaceOfRun(o.run);
-          if (sp && sp !== this.space) runCommand("space.select", { id: sp });
-          else pick(o.run.name)(cx);
-        })
-        .child(h_flex().gap(6)
-          .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(runName(o.run.name)))
-          .when(need > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.blocked).child(`${need} need you`)))
-          .when(ready > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.done).child(`${ready} ready`))))
-        .when(Boolean(first), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(first)))
-        .when(ready > 0, (el) => el.child(div().truncate().text_size(11).text_color(t.done).child(`ready to merge: ${readyLine}`)));
-    }).filter(Boolean);
 
     // For you: one row per item across runs, ready first. The place to look instead of scrolling
     // back in an orchestrator pane. Row: go to the run's space; PR number: open the PR.
@@ -813,7 +786,34 @@ export default class JobPanel extends View {
     });
     const fyMore = this.forYou.length - fyEls.length;
 
+    // Activity: the focused run's changes, newest first; "new" = since you last left this space.
+    const act = this.mode === "job" && v.run ? ((shared(ACT) ?? {})[v.run.name]?.events ?? []).slice().reverse() : [];
+    const looked = (shared(LOOKED) ?? {})[v.run?.name] ?? 0;
+    const ACT_N = this.showAllActivity ? 40 : 6;
+    const actEls = act.slice(0, ACT_N).map((e, i) => {
+      const fresh = e.at > looked;
+      const tag = (e.unit || "").split(/\s+/)[0];
+      return h_flex().id(`act-${i}`).px(8).gap(6).text_size(11.5)
+        .when(fresh, (el) => el.child(div().flex_none().px(4).rounded(4).bg(t.accent).text_color("#ffffff").text_size(10).font_semibold().child("new")))
+        .when(Boolean(tag), (el) => el.child(div().flex_none().text_color(t.foreground).font_semibold().child(tag)))
+        .when(Boolean(e.pr), (el) => el.child(div().id(`act-pr-${i}`).flex_none().text_color(t.accent).hover((s) => s.underline())
+          .on_click((_e, cx) => { cx.stop_propagation(); exec("gh", ["pr", "view", String(e.pr), "--web"], { cwd: this.cwd ?? home() }); })
+          .child(`#${e.pr}`)))
+        .child(div().flex_1().min_w(0).truncate().text_color(fresh ? t.foreground : t.muted).child(e.text))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(since(Date.now() - e.at)));
+    });
+    const actMore = act.length - actEls.length;
+    const activity = actEls.length === 0 ? [] : [
+      label(`ACTIVITY · ${act.filter((e) => e.at > looked).length} new`),
+      v_flex().gap(4).children(actEls)
+        .when(actMore > 0 || this.showAllActivity, (el) => el.child(div().id("act-more").px(8).text_size(11).text_color(t.dim)
+          .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.showAllActivity = !this.showAllActivity; cx.notify(); })
+          .child(this.showAllActivity ? "show less" : `+${actMore} earlier`))),
+      div().h(1).bg(t.raised),
+    ];
+
     return root
+      .when(fyEls.length === 0, (el) => el.child(label("FOR YOU · nothing right now")))
       .when(fyEls.length > 0, (el) => el
         .child(label(`FOR YOU · ${this.forYou.length}`))
         .child(v_flex().gap(3).children(fyEls)
@@ -824,15 +824,12 @@ export default class JobPanel extends View {
         : v.run ? `${runName(v.run.name).toUpperCase()} · ${summary} · ${fresh}${busy}`
         : `NO RUN FOR THIS SPACE · ${fresh}${busy}`))
       .child(v_flex().id("rows").flex_1().min_h(0).overflow_y_scrollbar().gap(3)
+        .children(activity)
         .children(body)
         .when(done.length > 0, (el) => el
           .child(div().id("done-toggle").px(8).py(4).text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
             .on_click((_e, cx) => { this.showDone = !this.showDone; cx.notify(); })
             .child(`${this.showDone ? "▾" : "▸"} ${done.length} merged or closed${realRun ? ` · ${realRun} need a real run` : ""}`))
-          .when(this.showDone, (el) => el.children(done.map((x, i) => row(x.r, `done-${i}`))))))
-      .when(otherEls.length > 0, (el) => el
-        .child(div().h(1).bg(t.raised))
-        .child(label("OTHER RUNS"))
-        .child(v_flex().gap(3).children(otherEls)));
+          .when(this.showDone, (el) => el.children(done.map((x, i) => row(x.r, `done-${i}`))))));
   }
 }
