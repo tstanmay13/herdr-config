@@ -11,7 +11,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { theme, focused, spaces, panes, agents, exec, home, readTextFile, watchFolder, run as runCommand, shared, setShared, notify, nextCommand } from "herdr";
 import { forYouItems, newItems, notice } from "./forYou.js";
-import { tables, runAsk, orchWord, strictWord, prNumber, cellsOf, align } from "./state.js";
+import { tables, runAsk, orchWord, strictWord, prNumber, cellsOf, align, forYouSection } from "./state.js";
 
 const ROOTS = () => [`${home()}/.config/agent-orchestrate/runs`, `${home()}/.claude/orchestrate/runs`];
 const FIELDS = "number,title,state,isDraft,url,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,headRefName,baseRefName";
@@ -264,7 +264,7 @@ async function forYouByRun(runs, read) {
     r.text = r.text ?? (await read(r));
     if (!r.text || /^\*\*Closed:\*\*/m.test(r.text)) continue;
     const t = tables(r.text);
-    byRun[r.name] = forYouItems(r.name, { units: t.units, workers: t.workers, ask: runAsk(r.text) }, strictWord, prNumber);
+    byRun[r.name] = forYouItems(r.name, { units: t.units, workers: t.workers, ask: runAsk(r.text), forYou: forYouSection(r.text) }, strictWord, prNumber);
   }
   return byRun;
 }
@@ -781,11 +781,21 @@ export default class JobPanel extends View {
         if (sp && sp !== this.space) runCommand("space.select", { id: sp });
         else pick(x.run)(cx);
       };
-      const openPr = (_e, cx) => {
+      const openPr = (n = x.pr) => (_e, cx) => {
         cx.stop_propagation();
-        if (x.url) exec("open", [x.url]);
-        else exec("gh", ["pr", "view", String(x.pr), "--web"], { cwd: this.cwd ?? home() });
+        const url = x.links?.[n] ?? (n === x.pr ? x.url : null);
+        if (url) exec("open", [url]);
+        else exec("gh", ["pr", "view", String(n), "--web"], { cwd: this.cwd ?? home() });
       };
+      // A "## For you" line: the line itself, every #NNNN in it a link.
+      if (x.todo) return v_flex().id(`fy-${i}`).px(8).py(4).gap(2).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => go(cx))
+        .child(h_flex().gap(6)
+          .child(div().flex_none().text_size(11).text_color(t.dim).child(runName(x.run)))
+          .child(div().flex_1())
+          .children(x.prs.slice(0, 3).map((n, k) => div().id(`fy-pr-${i}-${k}`).flex_none().text_size(11).text_color(t.accent)
+            .hover((s) => s.underline()).on_click(openPr(n)).child(`#${n}`))))
+        .child(div().whitespace_normal().text_color(x.word === "ready" ? t.foreground : t.foreground).child(x.ask));
       return v_flex().id(`fy-${i}`).px(8).py(4).rounded(6).bg(t.background).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => go(cx))
         .child(h_flex().gap(6)
@@ -795,14 +805,14 @@ export default class JobPanel extends View {
             + (this.forYou.some((y) => y.run !== x.run && runName(y.run) === runName(x.run)) ? ` ${x.run.slice(5, 10)}` : "")))
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(x.unit || "run"))
           .when(Boolean(x.pr), (el) => el.child(div().id(`fy-pr-${i}`).flex_none().text_size(11).text_color(t.accent ?? t.foreground)
-            .hover((s) => s.underline()).on_click(openPr).child(`#${x.pr}`))))
+            .hover((s) => s.underline()).on_click(openPr()).child(`#${x.pr}`))))
         .when(Boolean(x.ask), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(x.ask)));
     });
     const fyMore = this.forYou.length - fyEls.length;
 
     return root
       .when(fyEls.length > 0, (el) => el
-        .child(label(`FOR YOU · ${this.forYou.filter((x) => x.word === "ready").length} ready · ${this.forYou.filter((x) => x.word !== "ready").length} need you`))
+        .child(label(`FOR YOU · ${this.forYou.length}`))
         .child(v_flex().gap(3).children(fyEls)
           .when(fyMore > 0, (el) => el.child(div().px(8).text_size(11).text_color(t.dim).child(`+${fyMore} more`)))))
       .child(h_flex().gap(4).flex_wrap().children(chips))

@@ -3,7 +3,7 @@
 // after the baseline, i.e. every item counts as new). Reads only; writes nothing.
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { forYouItems, newItems, notice } from "../mods/job-panel/forYou.js";
-import { tables, runAsk, strictWord, prNumber } from "../mods/job-panel/state.js";
+import { tables, runAsk, strictWord, prNumber, forYouSection } from "../mods/job-panel/state.js";
 
 const root = `${process.env.HOME}/.config/agent-orchestrate/runs`;
 const runs = readdirSync(root).map((name) => ({ name, f: `${root}/${name}/state.md` }))
@@ -14,9 +14,9 @@ for (const r of runs) {
   const text = readFileSync(r.f, "utf8");
   if (/^\*\*Closed:\*\*/m.test(text)) continue;
   const t = tables(text);
-  byRun[r.name] = forYouItems(r.name, { ...t, ask: runAsk(text) }, strictWord, prNumber);
+  byRun[r.name] = forYouItems(r.name, { ...t, ask: runAsk(text), forYou: forYouSection(text) }, strictWord, prNumber);
 }
-console.log("FOR YOU");
+console.log("FOR YOU (runs with a ## For you section: " + Object.entries(byRun).filter(([, v]) => v.some((x) => x.todo)).map(([k]) => k).join(", ") + ")");
 for (const x of Object.values(byRun).flat().sort((a, b) => (a.word === "ready" ? 0 : 1) - (b.word === "ready" ? 0 : 1)))
   console.log(`  ${x.word.padEnd(9)} ${x.run.padEnd(32)} ${(x.unit || "run").padEnd(28)} ${x.pr ? "#" + x.pr : "".padEnd(6)}  ${x.ask.slice(0, 70)}`);
 const seen = process.argv[2] ? JSON.parse(readFileSync(process.argv[2], "utf8")) : { "_baseline": [] };

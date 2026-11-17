@@ -9,6 +9,22 @@ const WORDS = ["ready", "needs-you"];
 // runAsk(); `word(status)` -> { word, rest }; `prOf(cell)` -> PR number or null.
 // Key = unit id + status word, so a changed note never makes an item new again.
 export function forYouItems(run, parsed, word, prOf) {
+  // A run with a "## For you" section: only its lines count, each one item. The key is the
+  // normalized line (its [unit] tag kept), so the same action never fires twice. "Approve" and
+  // "Merge" items count as ready (green); anything else as needs you.
+  if (Array.isArray(parsed.forYou)) {
+    return parsed.forYou.map((text) => {
+      const tag = (/\[([^\]]+)\]\s*$/.exec(text) ?? [])[1] ?? "";
+      // "#18791" links; "layerone#744" (another repo) only when the line also gives its URL.
+      const links = Object.fromEntries([...text.matchAll(/https:\/\/github\.com\/[^\s)\]]+\/pull\/(\d+)/g)].map((m) => [m[1], m[0]]));
+      const prs = [...new Set([...text.matchAll(/(?<![\w\/])#(\d{3,})\b/g)].map((m) => m[1]).concat(Object.keys(links)))];
+      return {
+        run, key: `f:${text}`, word: /^(approve|merge)\b/i.test(text) ? "ready" : "needs-you",
+        unit: tag, pr: prs[0] ?? null, prs, links, url: links[prs[0]] ?? null, ask: text, todo: true,
+      };
+    }).sort((a, b) => WORDS.indexOf(a.word) - WORDS.indexOf(b.word));
+  }
+  // An older run without the section: ready / needs-you rows, workers and the Needs you line.
   const items = [];
   for (const u of parsed.units ?? []) {
     const { word: w, rest } = word(u.status);
@@ -57,8 +73,10 @@ export function newItems(seen, itemsByRun) {
 export function notice(runShort, items) {
   const kinds = [...new Set(items.map((x) => x.word))];
   const what = kinds.map((k) => (k === "ready" ? "ready to send for approval" : "needs you")).join(" · ");
-  const line = (x) => [x.unit || "run", x.pr ? `#${x.pr}` : null].filter(Boolean).join(" ") + (x.ask ? ` — ${short(x.ask, 90)}` : "");
-  return { title: `${runShort}: ${what}`, body: items.map(line).join("\n") };
+  const line = (x) => (x.todo ? short(x.ask, 110)
+    : [x.unit || "run", x.pr ? `#${x.pr}` : null].filter(Boolean).join(" ") + (x.ask ? ` — ${short(x.ask, 90)}` : ""));
+  const title = items.every((x) => x.todo) ? `${runShort}: ${items.length} for you` : `${runShort}: ${what}`;
+  return { title, body: items.map(line).join("\n") };
 }
 
 const short = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);

@@ -53,9 +53,12 @@ Not wired into `../install.sh` (the herdr TUI installer) yet.
   `!` only when the agent is blocked on a question (Herdr's meaning). When its run has items for
   you (`orchestrate.flags`), or a worker's own unit needs you, it stops and waves a "⚑ N for
   you" flag (click: go to it). A run that just closed dances.
-- `job-panel` "For you" (top of the panel): one row per item across open runs (state.md changed
-  in the last 14 days) whose status starts with `ready` (ready to send for approval) or
-  `needs-you`, plus each run's `**Needs you:**` line and workers that need you. Ready first.
+- `job-panel` "For you" (top of the panel): the human's to-dos across open runs (state.md changed
+  in the last 14 days). A run with a `## For you` section (orchestrate 9e8d2e0) counts only its
+  `- ` lines, one item each, keyed by the line's text; "Approve…"/"Merge…" lines count as ready
+  (green), and each `#NNNN` (or a PR URL in the line) is a link. An empty section means nothing
+  for you. Older runs without the heading fall back to rows whose status starts with `ready` or
+  `needs-you`, workers that need you, and the `**Needs you:**` line. Ready first.
   Click a row to go to the run's space, the PR number to open the PR. These are not Herdr's
   "Needs you" (an agent blocked on a question); nothing here changes an agent's state. When a
   run gains an item (unit id + status word, so a changed note never re-fires), one silent

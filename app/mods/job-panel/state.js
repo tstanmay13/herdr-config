@@ -80,3 +80,19 @@ export function strictWord(status) {
   return m ? { word: m[1].toLowerCase(), rest: s.slice(m[0].length) } : { word: "", rest: s };
 }
 
+
+// The "## For you" section (orchestrate 9e8d2e0): the human's to-do list, one "- " line per
+// action. Returns the lines, [] when the heading is there with nothing under it (nothing for
+// you), or null when the run has no such heading (an older run: use its status words instead).
+export function forYouSection(md) {
+  const lines = String(md ?? "").split("\n");
+  const at = lines.findIndex((l) => /^##\s+For you\s*$/i.test(l.trim()));
+  if (at < 0) return null;
+  const out = [];
+  for (const l of lines.slice(at + 1)) {
+    if (/^##\s/.test(l.trim())) break;
+    const m = /^\s*[-*]\s+(.+)$/.exec(l);
+    if (m) out.push(m[1].trim().replace(/\s+/g, " "));
+  }
+  return out;
+}
